@@ -3,7 +3,7 @@ requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dlr3-gbm-pfs"
+name = "icvs-gbm-pfs"
 version = "1.0.0"
 description = "Reproducible MRI survival modeling and biological interpretation for glioblastoma"
 readme = "README.md"
@@ -28,7 +28,7 @@ segmentation = ["nnunetv2>=2.4,<3"]
 test = ["pytest>=8.3,<9", "ruff>=0.12,<1"]
 
 [project.scripts]
-dlr3 = "dlr3.cli:main"
+icvs-gbm-pfs = "icvs_gbm_pfs.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

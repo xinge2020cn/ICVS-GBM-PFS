@@ -305,7 +305,7 @@ def command_explain(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dlr3")
+    parser = argparse.ArgumentParser(prog="icvs-gbm-pfs")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate-manifest")

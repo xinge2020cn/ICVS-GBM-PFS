@@ -3,7 +3,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from dlr3.survival import (  # noqa: E402
+from icvs_gbm_pfs.survival import (  # noqa: E402
     breslow_baseline_hazard,
     negative_cox_partial_log_likelihood,
     predict_survival_probabilities,

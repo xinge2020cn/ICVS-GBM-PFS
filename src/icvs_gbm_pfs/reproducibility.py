@@ -33,7 +33,7 @@ def environment_report() -> dict[str, object]:
 
     packages = {}
     for name in (
-        "dlr3-gbm-pfs",
+        "icvs-gbm-pfs",
         "numpy",
         "pandas",
         "scipy",

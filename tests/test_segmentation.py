@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("SimpleITK")
 
-from dlr3.segmentation import segmentation_metrics
+from icvs_gbm_pfs.segmentation import segmentation_metrics
 
 
 def test_identical_masks_have_perfect_metrics() -> None:

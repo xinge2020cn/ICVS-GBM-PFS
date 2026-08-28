@@ -4,8 +4,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from dlr3.config import StudyConfig, load_config
-from dlr3.evaluation import evaluate_models
+from icvs_gbm_pfs.config import StudyConfig, load_config
+from icvs_gbm_pfs.evaluation import evaluate_models
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "study.yaml"
 

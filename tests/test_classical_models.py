@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from dlr3.clinical import fit_clinical_model
-from dlr3.config import StudyConfig, load_config
-from dlr3.icvs import fit_icvs_model
+from icvs_gbm_pfs.clinical import fit_clinical_model
+from icvs_gbm_pfs.config import StudyConfig, load_config
+from icvs_gbm_pfs.icvs import fit_icvs_model
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "study.yaml"
 

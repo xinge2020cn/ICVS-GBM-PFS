@@ -60,9 +60,9 @@ Required fields before MRI preprocessing:
 The validation command blocks duplicate patients, invalid survival endpoints, path failures, a biological subset outside the training cohort, and overlap between development and spatial-validation centers.
 
 ```bash
-dlr3 validate-manifest \
+icvs-gbm-pfs validate-manifest \
   --config configs/study.yaml \
-  --manifest "$DLR3_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_MANIFEST" \
   --paths raw
 ```
 
@@ -71,11 +71,11 @@ dlr3 validate-manifest \
 The preprocessing command rigidly registers T1-weighted, T2-weighted, and T2-FLAIR volumes to contrast-enhanced T1-weighted imaging; applies N4 bias-field correction; uses the supplied brain mask for skull exclusion; resamples all volumes to 1.0 x 1.0 x 5.0 mm; performs patient- and sequence-specific z-standardization; and builds the combined tumor-peritumoral VOI.
 
 ```bash
-dlr3 preprocess \
+icvs-gbm-pfs preprocess \
   --config configs/study.yaml \
-  --manifest "$DLR3_MANIFEST" \
-  --output-root "$DLR3_PROCESSED_ROOT" \
-  --output-manifest "$DLR3_PROCESSED_MANIFEST"
+  --manifest "$ICVS_GBM_PFS_MANIFEST" \
+  --output-root "$ICVS_GBM_PFS_PROCESSED_ROOT" \
+  --output-manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST"
 ```
 
 ## Tumor-core segmentation
@@ -83,12 +83,12 @@ dlr3 preprocess \
 Only training-cohort masks are copied into the nnU-Net development directory. Planning, preprocessing, and all five folds use explicit storage locations. Validation cohorts are processed only by the locked five-fold ensemble.
 
 ```bash
-dlr3 prepare-nnunet \
+icvs-gbm-pfs prepare-nnunet \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --nnunet-raw "$NNUNET_RAW"
 
-dlr3 train-nnunet \
+icvs-gbm-pfs train-nnunet \
   --config configs/study.yaml \
   --nnunet-raw "$NNUNET_RAW" \
   --nnunet-preprocessed "$NNUNET_PREPROCESSED" \
@@ -98,10 +98,10 @@ dlr3 train-nnunet \
 Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, and patient-level volume pairs for Bland-Altman analysis.
 
 ```bash
-dlr3 evaluate-segmentation \
+icvs-gbm-pfs evaluate-segmentation \
   --config configs/study.yaml \
-  --manifest "$DLR3_SEGMENTATION_MANIFEST" \
-  --output-dir "$DLR3_SEGMENTATION_RESULTS"
+  --manifest "$ICVS_GBM_PFS_SEGMENTATION_MANIFEST" \
+  --output-dir "$ICVS_GBM_PFS_SEGMENTATION_RESULTS"
 ```
 
 ## Radiomics
@@ -109,17 +109,17 @@ dlr3 evaluate-segmentation \
 `configs/radiomics.yaml` fixes the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. The model performs univariable Cox screening, 10-fold LASSO-Cox penalty selection with the one-standard-error rule, and final multivariable Cox fitting.
 
 ```bash
-dlr3 extract-radiomics \
+icvs-gbm-pfs extract-radiomics \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --parameters configs/radiomics.yaml \
-  --output "$DLR3_RADIOMICS_FEATURES"
+  --output "$ICVS_GBM_PFS_RADIOMICS_FEATURES"
 
-dlr3 train-radiomics \
+icvs-gbm-pfs train-radiomics \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --features "$DLR3_RADIOMICS_FEATURES" \
-  --output-dir "$DLR3_RADIOMICS_RESULTS"
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --features "$ICVS_GBM_PFS_RADIOMICS_FEATURES" \
+  --output-dir "$ICVS_GBM_PFS_RADIOMICS_RESULTS"
 ```
 
 ## Deep survival models
@@ -129,26 +129,26 @@ The 3D-ViT uses 16 x 16 x 4-voxel patches, a 256-dimensional embedding, six pre-
 The duration-selection command uses only an 80:20 patient-level partition of the training cohort. Final execution uses the fixed duration, performs five-fold cross-fitting for training-cohort scores, refits once on the full training cohort, and then scores the temporal and spatial cohorts without model selection or refitting.
 
 ```bash
-dlr3 select-duration \
+icvs-gbm-pfs select-duration \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --model vit \
-  --cache-dir "$DLR3_VOLUME_CACHE" \
-  --output "$DLR3_VIT_DURATION"
+  --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --output "$ICVS_GBM_PFS_VIT_DURATION"
 
-dlr3 train-deep \
+icvs-gbm-pfs train-deep \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --model vit \
-  --cache-dir "$DLR3_VOLUME_CACHE" \
-  --output-dir "$DLR3_VIT_RESULTS"
+  --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --output-dir "$ICVS_GBM_PFS_VIT_RESULTS"
 
-dlr3 train-deep \
+icvs-gbm-pfs train-deep \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --model resnet \
-  --cache-dir "$DLR3_VOLUME_CACHE" \
-  --output-dir "$DLR3_RESNET_RESULTS"
+  --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --output-dir "$ICVS_GBM_PFS_RESNET_RESULTS"
 ```
 
 The augmentation path applies one spatial transform to all four MRI channels. It includes bounded rotation, translation, scaling, intensity shift and scale, Gaussian noise, and smoothing. Left-right flipping is not used.
@@ -158,16 +158,16 @@ The augmentation path applies one spatial transform to all four MRI channels. It
 The clinical comparator uses the three retained predictors with a Breslow-tied Cox model. ICVS is fitted once using standardized out-of-fold ViT scores and training outcomes. Training performance and probabilities use out-of-bag trees; validation uses the locked full forest and the final-model ViT score transformation estimated in the training cohort.
 
 ```bash
-dlr3 fit-clinical \
+icvs-gbm-pfs fit-clinical \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --output-dir "$DLR3_CLINICAL_RESULTS"
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --output-dir "$ICVS_GBM_PFS_CLINICAL_RESULTS"
 
-dlr3 fit-icvs \
+icvs-gbm-pfs fit-icvs \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --vit-scores "$DLR3_VIT_RESULTS/vit_scores.csv" \
-  --output-dir "$DLR3_ICVS_RESULTS"
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --vit-scores "$ICVS_GBM_PFS_VIT_RESULTS/vit_scores.csv" \
+  --output-dir "$ICVS_GBM_PFS_ICVS_RESULTS"
 ```
 
 ## Evaluation and interpretation
@@ -175,21 +175,21 @@ dlr3 fit-icvs \
 The prediction assembly command converts model-specific outputs to one patient-model table. Training deep-model rows use out-of-fold scores and matching survival estimates. ICVS training rows use out-of-bag outputs. Temporal and spatial validation rows use locked-model outputs.
 
 ```bash
-dlr3 assemble-predictions \
+icvs-gbm-pfs assemble-predictions \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --clinical "$DLR3_CLINICAL_RESULTS/clinical_predictions.csv" \
-  --radiomics "$DLR3_RADIOMICS_RESULTS/radiomics_scores.csv" \
-  --resnet "$DLR3_RESNET_RESULTS/resnet_scores.csv" \
-  --vit "$DLR3_VIT_RESULTS/vit_scores.csv" \
-  --icvs "$DLR3_ICVS_RESULTS/icvs_predictions.csv" \
-  --output "$DLR3_LOCKED_PREDICTIONS"
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --clinical "$ICVS_GBM_PFS_CLINICAL_RESULTS/clinical_predictions.csv" \
+  --radiomics "$ICVS_GBM_PFS_RADIOMICS_RESULTS/radiomics_scores.csv" \
+  --resnet "$ICVS_GBM_PFS_RESNET_RESULTS/resnet_scores.csv" \
+  --vit "$ICVS_GBM_PFS_VIT_RESULTS/vit_scores.csv" \
+  --icvs "$ICVS_GBM_PFS_ICVS_RESULTS/icvs_predictions.csv" \
+  --output "$ICVS_GBM_PFS_LOCKED_PREDICTIONS"
 
-dlr3 evaluate \
+icvs-gbm-pfs evaluate \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --predictions "$DLR3_LOCKED_PREDICTIONS" \
-  --output-dir "$DLR3_EVALUATION_RESULTS"
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --predictions "$ICVS_GBM_PFS_LOCKED_PREDICTIONS" \
+  --output-dir "$ICVS_GBM_PFS_EVALUATION_RESULTS"
 ```
 
 Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, IPCW Brier scores, integrated Brier score, grouped 12-month calibration, locked-median Kaplan-Meier stratification, adjusted Cox regression, and paired patient-level bootstrap comparisons. The biological subset is labeled as nested and is never reported as independent validation.
@@ -197,13 +197,13 @@ Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, IPCW B
 Time-dependent ICVS interpretation evaluates every coalition of the four predictors against the complete training-cohort background and verifies additivity for every patient and horizon.
 
 ```bash
-dlr3 explain-icvs \
+icvs-gbm-pfs explain-icvs \
   --config configs/study.yaml \
-  --manifest "$DLR3_PROCESSED_MANIFEST" \
-  --vit-scores "$DLR3_VIT_RESULTS/vit_scores.csv" \
-  --artifact "$DLR3_ICVS_RESULTS/icvs_model.joblib" \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --vit-scores "$ICVS_GBM_PFS_VIT_RESULTS/vit_scores.csv" \
+  --artifact "$ICVS_GBM_PFS_ICVS_RESULTS/icvs_model.joblib" \
   --patients 500 \
-  --output-dir "$DLR3_EXPLANATION_RESULTS"
+  --output-dir "$ICVS_GBM_PFS_EXPLANATION_RESULTS"
 ```
 
 ## Transcriptomic analysis
@@ -212,15 +212,15 @@ The R workflow restricts counts to GENCODE protein-coding genes, applies the pre
 
 ```bash
 Rscript R/biological_analysis.R \
-  --cohort "$DLR3_BIOLOGICAL_COHORT" \
-  --counts "$DLR3_RNA_COUNTS" \
-  --gene-annotation "$DLR3_GENCODE_REFERENCE" \
-  --hallmark-gmt "$DLR3_HALLMARK_GMT" \
-  --lm22-fractions "$DLR3_LM22_FRACTIONS" \
-  --vit-cutoff "$DLR3_VIT_CUTOFF" \
+  --cohort "$ICVS_GBM_PFS_BIOLOGICAL_COHORT" \
+  --counts "$ICVS_GBM_PFS_RNA_COUNTS" \
+  --gene-annotation "$ICVS_GBM_PFS_GENCODE_REFERENCE" \
+  --hallmark-gmt "$ICVS_GBM_PFS_HALLMARK_GMT" \
+  --lm22-fractions "$ICVS_GBM_PFS_LM22_FRACTIONS" \
+  --vit-cutoff "$ICVS_GBM_PFS_VIT_CUTOFF" \
   --bootstrap-resamples 3000 \
   --seed 2026 \
-  --output-dir "$DLR3_BIOLOGY_RESULTS"
+  --output-dir "$ICVS_GBM_PFS_BIOLOGY_RESULTS"
 ```
 
 ## Quality controls

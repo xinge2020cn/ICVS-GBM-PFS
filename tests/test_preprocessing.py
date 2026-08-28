@@ -7,7 +7,7 @@ pytest.importorskip("SimpleITK")
 pytest.importorskip("torch")
 import SimpleITK as sitk  # noqa: E402
 
-from dlr3.preprocessing import (  # noqa: E402
+from icvs_gbm_pfs.preprocessing import (  # noqa: E402
     build_tumor_peritumoral_voi,
     load_cropped_volume,
 )

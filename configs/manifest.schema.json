@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DLR3 patient-level manifest row",
+  "title": "ICVS-GBM-PFS patient-level manifest row",
   "type": "object",
   "required": [
     "patient_id",

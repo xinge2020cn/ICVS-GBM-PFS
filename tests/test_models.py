@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from dlr3.models import ResNet3DSurvival, VisionTransformer3DSurvival  # noqa: E402
+from icvs_gbm_pfs.models import ResNet3DSurvival, VisionTransformer3DSurvival  # noqa: E402
 
 
 def test_vit_returns_one_log_risk_per_volume() -> None:

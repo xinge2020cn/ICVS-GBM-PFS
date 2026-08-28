@@ -3,8 +3,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from dlr3.config import load_config
-from dlr3.data import validate_manifest
+from icvs_gbm_pfs.config import load_config
+from icvs_gbm_pfs.data import validate_manifest
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "study.yaml"
 
