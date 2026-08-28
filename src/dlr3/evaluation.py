@@ -14,7 +14,6 @@ from sksurv.metrics import (
     brier_score,
     concordance_index_censored,
     cumulative_dynamic_auc,
-    integrated_brier_score,
 )
 
 from .config import StudyConfig
@@ -50,12 +49,7 @@ def _metric_values(
         if not np.isclose(brier_times[index], horizon):
             raise RuntimeError("Brier-score horizons changed unexpectedly.")
     result["integrated_brier_score"] = float(
-        integrated_brier_score(
-            training_outcome,
-            test_outcome,
-            survival_probability,
-            horizons,
-        )
+        np.trapezoid(brier_values, brier_times) / (brier_times[-1] - brier_times[0])
     )
     return result
 
