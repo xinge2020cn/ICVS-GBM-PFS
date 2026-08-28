@@ -7,7 +7,7 @@ name = "dlr3-gbm-pfs"
 version = "1.0.0"
 description = "Reproducible MRI survival modeling and biological interpretation for glioblastoma"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.13"
 license = {file = "LICENSE"}
 dependencies = [
   "joblib>=1.4,<2",
@@ -15,8 +15,8 @@ dependencies = [
   "numpy>=2.0,<3",
   "pandas>=2.2,<3",
   "PyYAML>=6.0,<7",
-  "scikit-learn>=1.6,<2",
-  "scikit-survival>=0.25,<0.27",
+  "scikit-learn>=1.9,<1.10",
+  "scikit-survival>=0.28,<0.29",
   "scipy>=1.14,<2",
   "SimpleITK>=2.4,<3",
   "torch>=2.7,<3",

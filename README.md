@@ -20,7 +20,7 @@ All input identifiers must be nonidentifying surrogates. Names, medical-record n
 
 ## Installation
 
-Python 3.10 or 3.11 is recommended.
+Python 3.11 is recommended.
 
 ```bash
 python -m venv .venv
