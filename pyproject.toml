@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dlr3-gbm-pfs"
+version = "1.0.0"
+description = "Reproducible MRI survival modeling and biological interpretation for glioblastoma"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = {file = "LICENSE"}
+dependencies = [
+  "joblib>=1.4,<2",
+  "lifelines>=0.30,<1",
+  "numpy>=2.0,<3",
+  "pandas>=2.2,<3",
+  "PyYAML>=6.0,<7",
+  "scikit-learn>=1.6,<2",
+  "scikit-survival>=0.25,<0.27",
+  "scipy>=1.14,<2",
+  "SimpleITK>=2.4,<3",
+  "torch>=2.7,<3",
+]
+
+[project.optional-dependencies]
+radiomics = ["pyradiomics>=3.1,<4"]
+segmentation = ["nnunetv2>=2.4,<3"]
+test = ["pytest>=8.3,<9", "ruff>=0.12,<1"]
+
+[project.scripts]
+dlr3 = "dlr3.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

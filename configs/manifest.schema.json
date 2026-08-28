@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DLR3 patient-level manifest row",
+  "type": "object",
+  "required": [
+    "patient_id",
+    "cohort",
+    "center_id",
+    "pfs_months",
+    "pfs_event",
+    "biological_subset",
+    "age_years",
+    "mgmt_methylated",
+    "non_gross_total_resection",
+    "t1_path",
+    "t2_path",
+    "flair_path",
+    "ce_t1_path",
+    "brain_mask_path",
+    "tumor_mask_path"
+  ],
+  "properties": {
+    "patient_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Nonidentifying patient surrogate unique across all cohorts."
+    },
+    "cohort": {
+      "enum": ["training", "temporal_validation", "spatial_validation"]
+    },
+    "center_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pfs_months": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "pfs_event": {
+      "enum": [0, 1]
+    },
+    "biological_subset": {
+      "enum": [0, 1]
+    },
+    "age_years": {
+      "type": "number",
+      "minimum": 18
+    },
+    "mgmt_methylated": {
+      "enum": [0, 1]
+    },
+    "non_gross_total_resection": {
+      "enum": [0, 1]
+    },
+    "t1_path": {
+      "type": "string"
+    },
+    "t2_path": {
+      "type": "string"
+    },
+    "flair_path": {
+      "type": "string"
+    },
+    "ce_t1_path": {
+      "type": "string"
+    },
+    "brain_mask_path": {
+      "type": "string"
+    },
+    "tumor_mask_path": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

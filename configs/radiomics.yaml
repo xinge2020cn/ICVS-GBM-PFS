@@ -1,0 +1,23 @@
+imageType:
+  Original: {}
+  Wavelet:
+    wavelet: coif1
+  LoG:
+    sigma: [1.0, 2.0, 3.0]
+
+featureClass:
+  firstorder: []
+  shape: []
+  glcm: []
+  glrlm: []
+  glszm: []
+  gldm: []
+  ngtdm: []
+
+setting:
+  binWidth: 0.25
+  normalize: false
+  resampledPixelSpacing: null
+  interpolator: sitkBSpline
+  correctMask: true
+  force2D: false

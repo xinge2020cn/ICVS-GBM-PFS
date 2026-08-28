@@ -1,0 +1,89 @@
+seed: 2026
+
+columns:
+  patient_id: patient_id
+  cohort: cohort
+  center_id: center_id
+  pfs_time: pfs_months
+  pfs_event: pfs_event
+  biological_subset: biological_subset
+  age: age_years
+  mgmt: mgmt_methylated
+  extent_of_resection: non_gross_total_resection
+
+cohorts:
+  training: training
+  temporal_validation: temporal_validation
+  spatial_validation: spatial_validation
+
+modalities:
+  - t1
+  - t2
+  - flair
+  - ce_t1
+
+preprocessing:
+  reference_modality: ce_t1
+  output_spacing_mm: [1.0, 1.0, 5.0]
+  peritumoral_margin_mm: 10.0
+  target_shape_dhw: [24, 192, 192]
+
+segmentation:
+  dataset_id: 501
+  configuration: 3d_fullres
+  folds: [0, 1, 2, 3, 4]
+  patch_shape_dhw: [32, 192, 192]
+  epochs: 1000
+  batch_size: 2
+  surface_dice_tolerance_mm: 2.0
+
+deep_survival:
+  input_channels: 4
+  vit:
+    patch_shape_dhw: [4, 16, 16]
+    embedding_dim: 256
+    depth: 6
+    heads: 8
+    mlp_ratio: 4.0
+    attention_dropout: 0.10
+    projection_dropout: 0.10
+    head_dim: 64
+    head_dropout: 0.30
+    epochs: 120
+    physical_batch_size: 4
+    accumulation_steps: 4
+  resnet:
+    stage_blocks: [2, 2, 2, 2]
+    stage_channels: [64, 128, 256, 512]
+    head_dim: 64
+    head_dropout: 0.30
+    epochs: 100
+    physical_batch_size: 8
+    accumulation_steps: 2
+  optimization:
+    learning_rate: 0.0001
+    weight_decay: 0.00001
+    warmup_epochs: 10
+    minimum_learning_rate: 0.000001
+    gradient_clip_norm: 1.0
+    tuning_fraction: 0.20
+    maximum_tuning_epochs: 200
+    early_stopping_patience: 30
+    crossfit_folds: 5
+
+radiomics:
+  univariable_p_threshold: 0.05
+  cross_validation_folds: 10
+  use_one_standard_error_rule: true
+
+icvs:
+  horizons_months: [6, 12, 18, 24, 30, 36]
+  n_estimators: 500
+  max_features: 2
+  min_samples_split: 20
+  min_samples_leaf: 10
+
+evaluation:
+  bootstrap_resamples: 1000
+  calibration_horizon_months: 12
+  calibration_groups: 8
