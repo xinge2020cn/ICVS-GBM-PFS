@@ -1,4 +1,4 @@
-# DLR3: MRI phenotype modeling for progression-free survival in glioblastoma
+# ICVS-GBM-PFS: MRI phenotype modeling for progression-free survival in glioblastoma
 
 This repository contains the analysis code for patient-level MRI preprocessing, tumor-core segmentation, radiomics, three-dimensional deep survival modeling, integrated clinical-imaging survival modeling, locked-cohort evaluation, time-dependent model interpretation, and transcriptomic analysis.
 
@@ -14,9 +14,7 @@ The implementation follows the accompanying study protocol:
 
 ## Repository scope
 
-This repository contains source code and fixed analysis parameters. It does not contain patient records, MRI volumes, masks, RNA-seq matrices, model checkpoints, or patient-level predictions. Access to institutional data remains subject to ethics approval, data-use agreements, and local governance. The reported numerical results cannot be recreated without the governed study data and locked model artifacts.
-
-All input identifiers must be nonidentifying surrogates. Names, medical-record numbers, accession numbers, dates, and raw DICOM metadata must not be placed in the manifest or committed to version control.
+This repository contains source code and fixed analysis parameters. It does not contain patient records, MRI volumes, masks, RNA-seq matrices, model checkpoints, or patient-level predictions.
 
 ## Installation
 
