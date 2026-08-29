@@ -9,6 +9,19 @@ description = "Reproducible MRI survival modeling and biological interpretation 
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = {file = "LICENSE"}
+authors = [
+  {name = "Xin Ge", email = "238012762+xinge2020cn@users.noreply.github.com"},
+]
+keywords = ["glioblastoma", "MRI", "survival analysis", "radiomics", "deep learning"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = [
   "joblib>=1.4,<2",
   "lifelines>=0.30,<1",
@@ -21,6 +34,10 @@ dependencies = [
   "SimpleITK>=2.4,<3",
   "torch>=2.7,<3",
 ]
+
+[project.urls]
+Repository = "https://github.com/xinge2020cn/ICVS-GBM-PFS"
+Issues = "https://github.com/xinge2020cn/ICVS-GBM-PFS/issues"
 
 [project.optional-dependencies]
 radiomics = ["pyradiomics>=3.1,<4"]

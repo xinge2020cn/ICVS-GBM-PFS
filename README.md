@@ -93,6 +93,21 @@ icvs-gbm-pfs train-nnunet \
   --nnunet-raw "$NNUNET_RAW" \
   --nnunet-preprocessed "$NNUNET_PREPROCESSED" \
   --nnunet-results "$NNUNET_RESULTS"
+
+icvs-gbm-pfs prepare-nnunet-inference \
+  --config configs/study.yaml \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --input-dir "$ICVS_GBM_PFS_NNUNET_INPUT" \
+  --prediction-dir "$ICVS_GBM_PFS_NNUNET_PREDICTIONS" \
+  --output-manifest "$ICVS_GBM_PFS_SEGMENTATION_MANIFEST"
+
+icvs-gbm-pfs predict-nnunet \
+  --config configs/study.yaml \
+  --input-dir "$ICVS_GBM_PFS_NNUNET_INPUT" \
+  --output-dir "$ICVS_GBM_PFS_NNUNET_PREDICTIONS" \
+  --nnunet-raw "$NNUNET_RAW" \
+  --nnunet-preprocessed "$NNUNET_PREPROCESSED" \
+  --nnunet-results "$NNUNET_RESULTS"
 ```
 
 Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, and patient-level volume pairs for Bland-Altman analysis.
@@ -107,7 +122,7 @@ icvs-gbm-pfs evaluate-segmentation \
 
 ## Radiomics
 
-`configs/radiomics.yaml` fixes the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Modality-independent shape features are retained once, while first-order and texture features remain sequence-specific. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. The model performs univariable Cox screening, 10-fold LASSO-Cox penalty selection with the one-standard-error rule, and final multivariable Cox fitting.
+`configs/radiomics.yaml` fixes radiomics-only 1.0-mm isotropic resampling, the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Modality-independent shape features are retained once, while first-order and texture features remain sequence-specific. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. Within each cross-validation split, univariable screening and standardization are refitted using only that split's fitting patients. Fold-specific LASSO-Cox paths are compared by relative penalty position, the penalty is selected with the one-standard-error rule, and the final screened multivariable Cox model is fitted once in the complete training cohort.
 
 ```bash
 icvs-gbm-pfs extract-radiomics \
@@ -202,7 +217,7 @@ icvs-gbm-pfs evaluate \
   --output-dir "$ICVS_GBM_PFS_EVALUATION_RESULTS"
 ```
 
-Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, IPCW Brier scores, integrated Brier score, grouped 12-month calibration, locked-median Kaplan-Meier stratification, adjusted Cox regression, and paired patient-level bootstrap comparisons. The biological subset is labeled as nested and is never reported as independent validation.
+Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, IPCW Brier scores, integrated Brier score, grouped 12-month calibration, locked-median Kaplan-Meier stratification, complete unadjusted and adjusted Cox tables, rank-based Schoenfeld residual tests of proportional hazards, and paired patient-level bootstrap comparisons. Benjamini-Hochberg adjustments are reported for model-wise risk-stratification tests within each cohort and pairwise model comparisons within each cohort and metric. The biological subset is labeled as nested and is never reported as independent validation. The workflow evaluates prognostic performance; it does not claim that a clinical decision threshold or net benefit has been established.
 
 Time-dependent ICVS interpretation evaluates every coalition of the four predictors against the complete training-cohort background and verifies additivity for every patient and horizon.
 
@@ -254,3 +269,7 @@ The automated checks cover manifest isolation, Cox loss and baseline-hazard calc
 ## License
 
 The source code is released under the MIT License. Data access, trained weights, and institutional model artifacts are not granted by this software license.
+
+## Citation
+
+Citation metadata for this release is provided in `CITATION.cff`. When the associated article has a persistent identifier, add that article citation alongside the software citation.

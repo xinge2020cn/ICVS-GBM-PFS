@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from icvs_gbm_pfs.config import StudyConfig, load_config
-from icvs_gbm_pfs.evaluation import evaluate_models
+from icvs_gbm_pfs.evaluation import _benjamini_hochberg, evaluate_models
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "study.yaml"
 
@@ -16,6 +16,11 @@ def evaluation_config() -> StudyConfig:
     values = deepcopy(original.values)
     values["evaluation"]["bootstrap_resamples"] = 10
     return StudyConfig(values=values, source=original.source)
+
+
+def test_benjamini_hochberg_preserves_original_order() -> None:
+    adjusted = _benjamini_hochberg(pd.Series([0.01, 0.04, 0.03]))
+    assert np.allclose(adjusted, [0.03, 0.04, 0.04])
 
 
 def test_locked_evaluation_writes_all_primary_tables(tmp_path: Path) -> None:
@@ -60,11 +65,21 @@ def test_locked_evaluation_writes_all_primary_tables(tmp_path: Path) -> None:
         "performance",
         "calibration",
         "risk_stratification",
+        "cox_regression",
         "pairwise_comparisons",
     }
     assert len(tables["performance"]) == 3
     assert (tmp_path / "performance.csv").is_file()
     assert (tmp_path / "calibration.csv").is_file()
+    assert (tmp_path / "cox_regression.csv").is_file()
+    assert "logrank_p_value_fdr" in tables["risk_stratification"]
+    assert {
+        "hazard_ratio",
+        "ci_low",
+        "ci_high",
+        "p_value",
+        "proportional_hazards_p_value",
+    }.issubset(tables["cox_regression"].columns)
 
 
 def test_locked_evaluation_rejects_incomplete_patient_coverage(tmp_path: Path) -> None:

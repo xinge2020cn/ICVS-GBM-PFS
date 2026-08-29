@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter, KaplanMeierFitter
-from lifelines.statistics import logrank_test
+from lifelines.statistics import logrank_test, proportional_hazard_test
 from sksurv.metrics import (
     brier_score,
     concordance_index_censored,
@@ -18,6 +18,22 @@ from sksurv.metrics import (
 
 from .config import StudyConfig
 from .survival import structured_survival
+
+
+def _benjamini_hochberg(p_values: pd.Series) -> np.ndarray:
+    """Adjust one prespecified family of P values while preserving row order."""
+
+    values = pd.to_numeric(p_values, errors="coerce").to_numpy(float)
+    if values.ndim != 1 or not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+        raise ValueError("P values must be finite and lie between zero and one.")
+    order = np.argsort(values, kind="stable")
+    ranked = values[order]
+    adjusted_ranked = np.minimum.accumulate(
+        (ranked * len(ranked) / np.arange(1, len(ranked) + 1))[::-1]
+    )[::-1]
+    adjusted = np.empty_like(adjusted_ranked)
+    adjusted[order] = np.minimum(adjusted_ranked, 1.0)
+    return adjusted
 
 
 def _validate_prediction_table(
@@ -177,7 +193,7 @@ def _risk_stratification(
     time_column: str,
     event_column: str,
     adjustment_columns: list[str],
-) -> dict[str, float]:
+) -> tuple[dict[str, float], list[dict[str, float | str]]]:
     values = frame[[time_column, event_column, score_column, *adjustment_columns]].copy()
     values["high_risk"] = (values[score_column] > cutoff).astype(int)
     high = values.loc[values["high_risk"].eq(1)]
@@ -200,9 +216,19 @@ def _risk_stratification(
         duration_col=time_column,
         event_col=event_column,
     )
+    unadjusted_ph = proportional_hazard_test(
+        unadjusted,
+        values[[time_column, event_column, "high_risk"]],
+        time_transform="rank",
+    ).summary
+    adjusted_ph = proportional_hazard_test(
+        adjusted,
+        values[[time_column, event_column, "high_risk", *adjustment_columns]],
+        time_transform="rank",
+    ).summary
     unadjusted_row = unadjusted.summary.loc["high_risk"]
     adjusted_row = adjusted.summary.loc["high_risk"]
-    return {
+    summary = {
         "cutoff": cutoff,
         "low_risk_n": len(low),
         "high_risk_n": len(high),
@@ -214,7 +240,30 @@ def _risk_stratification(
         "adjusted_ci_low": float(adjusted_row["exp(coef) lower 95%"]),
         "adjusted_ci_high": float(adjusted_row["exp(coef) upper 95%"]),
         "adjusted_p_value": float(adjusted_row["p"]),
+        "unadjusted_ph_p_value": float(unadjusted_ph.loc["high_risk", "p"]),
+        "adjusted_ph_p_value": float(adjusted_ph.loc["high_risk", "p"]),
+        "adjusted_minimum_ph_p_value": float(adjusted_ph["p"].min()),
     }
+    coefficient_rows = []
+    for analysis, model, ph_table in (
+        ("unadjusted", unadjusted, unadjusted_ph),
+        ("adjusted", adjusted, adjusted_ph),
+    ):
+        for term, row in model.summary.iterrows():
+            coefficient_rows.append(
+                {
+                    "analysis": analysis,
+                    "term": str(term),
+                    "coefficient": float(row["coef"]),
+                    "standard_error": float(row["se(coef)"]),
+                    "hazard_ratio": float(row["exp(coef)"]),
+                    "ci_low": float(row["exp(coef) lower 95%"]),
+                    "ci_high": float(row["exp(coef) upper 95%"]),
+                    "p_value": float(row["p"]),
+                    "proportional_hazards_p_value": float(ph_table.loc[term, "p"]),
+                }
+            )
+    return summary, coefficient_rows
 
 
 def _bootstrap_pairwise(
@@ -347,6 +396,7 @@ def evaluate_models(
     performance_rows = []
     calibration_rows = []
     risk_rows = []
+    cox_rows = []
     pairwise_rows = []
     settings = config.section("evaluation")
     adjustment_columns = [
@@ -413,20 +463,19 @@ def evaluate_models(
             calibration.insert(0, "model", model_name)
             calibration.insert(0, "cohort", cohort_name)
             calibration_rows.extend(calibration.to_dict(orient="records"))
-            risk_rows.append(
-                {
-                    "cohort": cohort_name,
-                    "model": model_name,
-                    **_risk_stratification(
-                        model_frame,
-                        score_column="risk_score",
-                        cutoff=float(cutoffs[model_name]),
-                        time_column=time_col,
-                        event_column=event_col,
-                        adjustment_columns=adjustment_columns,
-                    ),
-                }
+            risk_summary, coefficient_rows = _risk_stratification(
+                model_frame,
+                score_column="risk_score",
+                cutoff=float(cutoffs[model_name]),
+                time_column=time_col,
+                event_column=event_col,
+                adjustment_columns=adjustment_columns,
             )
+            risk_rows.append(
+                {"cohort": cohort_name, "model": model_name, **risk_summary}
+            )
+            for row in coefficient_rows:
+                cox_rows.append({"cohort": cohort_name, "model": model_name, **row})
         models = sorted(cohort["model"].unique())
         for pair_index, (first_model, second_model) in enumerate(itertools.combinations(models, 2)):
             rows = _bootstrap_pairwise(
@@ -444,11 +493,25 @@ def evaluate_models(
                 row["cohort"] = cohort_name
                 row["independent_validation"] = independent and cohort_name != "training"
             pairwise_rows.extend(rows)
+    risk_table = pd.DataFrame(risk_rows)
+    pairwise_table = pd.DataFrame(pairwise_rows)
+    if not risk_table.empty:
+        risk_table["logrank_p_value_fdr"] = risk_table.groupby("cohort", sort=False)[
+            "logrank_p_value"
+        ].transform(_benjamini_hochberg)
+        risk_table["adjusted_p_value_fdr"] = risk_table.groupby("cohort", sort=False)[
+            "adjusted_p_value"
+        ].transform(_benjamini_hochberg)
+    if not pairwise_table.empty:
+        pairwise_table["p_value_fdr"] = pairwise_table.groupby(
+            ["cohort", "metric"], sort=False
+        )["p_value"].transform(_benjamini_hochberg)
     tables = {
         "performance": pd.DataFrame(performance_rows),
         "calibration": pd.DataFrame(calibration_rows),
-        "risk_stratification": pd.DataFrame(risk_rows),
-        "pairwise_comparisons": pd.DataFrame(pairwise_rows),
+        "risk_stratification": risk_table,
+        "cox_regression": pd.DataFrame(cox_rows),
+        "pairwise_comparisons": pairwise_table,
     }
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -461,6 +524,11 @@ def evaluate_models(
                 "bootstrap_resamples": int(settings["bootstrap_resamples"]),
                 "training_censoring_distribution_used_for_all_cohorts": True,
                 "biological_subset_is_independent": False,
+                "multiplicity_adjustment": {
+                    "method": "Benjamini-Hochberg",
+                    "risk_stratification_family": "models within cohort",
+                    "pairwise_comparison_family": "model pairs within cohort and metric",
+                },
             },
             indent=2,
         )

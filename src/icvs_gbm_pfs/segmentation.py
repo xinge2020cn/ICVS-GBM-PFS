@@ -30,19 +30,28 @@ def _same_image_geometry(first: sitk.Image, second: sitk.Image) -> bool:
     )
 
 
-def _validate_nnunet_case(record: dict[str, object]) -> None:
+def _nnunet_images(record: dict[str, object]) -> list[sitk.Image]:
     image_columns = (
         "preprocessed_t1_path",
         "preprocessed_t2_path",
         "preprocessed_flair_path",
         "preprocessed_ce_t1_path",
     )
-    images = [sitk.ReadImage(str(record[column])) for column in image_columns]
+    return [sitk.ReadImage(str(record[column])) for column in image_columns]
+
+
+def _validate_nnunet_images(record: dict[str, object]) -> sitk.Image:
+    images = _nnunet_images(record)
     reference = images[0]
     if reference.GetDimension() != 3 or any(
         not _same_image_geometry(reference, image) for image in images[1:]
     ):
         raise ValueError("Each nnU-Net case must contain four images with identical 3D geometry.")
+    return reference
+
+
+def _validate_nnunet_case(record: dict[str, object]) -> None:
+    reference = _validate_nnunet_images(record)
     label = sitk.ReadImage(str(record["preprocessed_tumor_mask_path"]), sitk.sitkUInt8)
     if not _same_image_geometry(reference, label):
         raise ValueError("The nnU-Net image channels and tumor mask must use identical geometry.")
@@ -114,6 +123,79 @@ def prepare_nnunet_dataset(
     )
     pd.DataFrame(mapping).to_csv(dataset_dir / "case_mapping.csv", index=False)
     return dataset_dir
+
+
+def prepare_nnunet_inference(
+    frame: pd.DataFrame,
+    config: StudyConfig,
+    *,
+    input_dir: str | Path,
+    prediction_dir: str | Path,
+    output_manifest: str | Path,
+) -> pd.DataFrame:
+    """Prepare locked validation inputs and a patient-level segmentation audit manifest."""
+
+    patient_col = config.column("patient_id")
+    cohort_col = config.column("cohort")
+    validation_labels = {
+        config.cohort("temporal_validation"),
+        config.cohort("spatial_validation"),
+    }
+    validation = frame.loc[frame[cohort_col].isin(validation_labels)].copy()
+    if validation.empty:
+        raise ValueError("No temporal or spatial validation patients were found.")
+    required = [
+        patient_col,
+        cohort_col,
+        "preprocessed_t1_path",
+        "preprocessed_t2_path",
+        "preprocessed_flair_path",
+        "preprocessed_ce_t1_path",
+        "preprocessed_tumor_mask_path",
+    ]
+    missing = [column for column in required if column not in validation]
+    if missing:
+        raise ValueError(f"Manifest is missing nnU-Net inference columns: {', '.join(missing)}")
+    if validation[patient_col].duplicated().any():
+        raise ValueError("Validation patient identifiers must be unique.")
+    destination = Path(input_dir).resolve()
+    prediction_root = Path(prediction_dir).resolve()
+    if destination == prediction_root:
+        raise ValueError("nnU-Net inference inputs and predictions require distinct directories.")
+    if destination.exists() and any(destination.iterdir()):
+        raise FileExistsError(f"The nnU-Net inference directory must be empty: {destination}")
+    if prediction_root.exists() and any(prediction_root.iterdir()):
+        raise FileExistsError(f"The nnU-Net prediction directory must be empty: {prediction_root}")
+    destination.mkdir(parents=True, exist_ok=True)
+    prediction_root.mkdir(parents=True, exist_ok=True)
+    rows = []
+    image_columns = (
+        "preprocessed_t1_path",
+        "preprocessed_t2_path",
+        "preprocessed_flair_path",
+        "preprocessed_ce_t1_path",
+    )
+    for index, record in enumerate(validation.to_dict(orient="records"), start=1):
+        _validate_nnunet_case(record)
+        case_id = f"GBMIV_{index:04d}"
+        for channel, column in enumerate(image_columns):
+            shutil.copy2(str(record[column]), destination / f"{case_id}_{channel:04d}.nii.gz")
+        rows.append(
+            {
+                "case_id": case_id,
+                patient_col: str(record[patient_col]),
+                cohort_col: str(record[cohort_col]),
+                "reference_mask_path": str(
+                    Path(str(record["preprocessed_tumor_mask_path"])).resolve()
+                ),
+                "prediction_mask_path": str(prediction_root / f"{case_id}.nii.gz"),
+            }
+        )
+    result = pd.DataFrame(rows)
+    manifest_path = Path(output_manifest).resolve()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(manifest_path, index=False)
+    return result
 
 
 @contextmanager

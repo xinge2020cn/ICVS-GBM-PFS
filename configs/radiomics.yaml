@@ -17,7 +17,7 @@ featureClass:
 setting:
   binWidth: 0.25
   normalize: false
-  resampledPixelSpacing: null
+  resampledPixelSpacing: [1.0, 1.0, 1.0]
   interpolator: sitkBSpline
   correctMask: true
   force2D: false

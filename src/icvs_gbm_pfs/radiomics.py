@@ -140,6 +140,30 @@ def _negative_partial_log_likelihood(
     return total / events
 
 
+def _fit_lasso_path(features: np.ndarray, outcome: np.ndarray) -> CoxnetSurvivalAnalysis:
+    """Fit one complete LASSO-Cox path without importing a penalty grid from another fold."""
+
+    return CoxnetSurvivalAnalysis(
+        l1_ratio=1.0,
+        n_alphas=100,
+        alpha_min_ratio=0.01,
+        normalize=False,
+        max_iter=200000,
+        tol=1e-8,
+    ).fit(features, outcome)
+
+
+def _relative_penalty_path(model: CoxnetSurvivalAnalysis) -> np.ndarray:
+    """Return the fold-comparable penalty fraction along an automatically fitted path."""
+
+    alphas = np.asarray(model.alphas_, dtype=float)
+    if alphas.ndim != 1 or alphas.size == 0 or not np.isfinite(alphas).all():
+        raise RuntimeError("LASSO-Cox returned an invalid penalty path.")
+    if alphas[0] <= 0 or np.any(alphas <= 0) or np.any(np.diff(alphas) >= 0):
+        raise RuntimeError("LASSO-Cox penalties must be positive and strictly decreasing.")
+    return alphas / alphas[0]
+
+
 def fit_radiomics_model(
     manifest: pd.DataFrame,
     features: pd.DataFrame,
@@ -178,47 +202,79 @@ def fit_radiomics_model(
     full_scaler = StandardScaler().fit(training[candidates])
     full_x = full_scaler.transform(training[candidates])
     training_y = structured_survival(training[event_col], training[time_col])
-    path_model = CoxnetSurvivalAnalysis(
-        l1_ratio=1.0,
-        n_alphas=100,
-        alpha_min_ratio=0.01,
-        normalize=False,
-        max_iter=200000,
-        tol=1e-8,
-    ).fit(full_x, training_y)
-    alphas = path_model.alphas_
+    path_model = _fit_lasso_path(full_x, training_y)
+    alphas = np.asarray(path_model.alphas_, dtype=float)
+    relative_penalties = _relative_penalty_path(path_model)
     folds = int(config.section("radiomics")["cross_validation_folds"])
     if folds < 2 or len(training) < folds:
         raise ValueError(
             "Radiomics cross-validation requires at least two folds and one patient per fold."
         )
     splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=config.seed)
-    fold_losses = np.full((folds, len(alphas)), np.nan, dtype=float)
     strata = survival_strata(training, config, minimum_count=folds)
+    fold_loss_rows: list[np.ndarray] = []
+    fold_alpha_paths: list[np.ndarray] = []
+    fold_penalty_paths: list[np.ndarray] = []
+    fold_screen_rows: list[pd.DataFrame] = []
+    fold_assignments: list[dict[str, object]] = []
     for fold, (fit_indices, held_out_indices) in enumerate(splitter.split(training, strata)):
-        fold_scaler = StandardScaler().fit(training.iloc[fit_indices][candidates])
-        fit_x = fold_scaler.transform(training.iloc[fit_indices][candidates])
-        held_out_x = fold_scaler.transform(training.iloc[held_out_indices][candidates])
-        fit_y = structured_survival(
-            training.iloc[fit_indices][event_col], training.iloc[fit_indices][time_col]
+        fit_frame = training.iloc[fit_indices]
+        held_out_frame = training.iloc[held_out_indices]
+        fold_screen = _univariable_screen(
+            fit_frame,
+            feature_columns,
+            time_column=time_col,
+            event_column=event_col,
         )
-        held_out_time = training.iloc[held_out_indices][time_col].to_numpy(float)
-        held_out_event = training.iloc[held_out_indices][event_col].to_numpy(bool)
-        for alpha_index, alpha in enumerate(alphas):
+        fold_screen.insert(0, "fold", fold)
+        fold_screen["passed_threshold"] = fold_screen["p_value"] < threshold
+        fold_screen_rows.append(fold_screen)
+        fold_candidates = fold_screen.loc[fold_screen["passed_threshold"], "feature"].tolist()
+        if not fold_candidates:
+            raise RuntimeError(
+                f"No radiomic features passed the prespecified threshold in cross-validation "
+                f"fold {fold}."
+            )
+        fold_scaler = StandardScaler().fit(fit_frame[fold_candidates])
+        fit_x = fold_scaler.transform(fit_frame[fold_candidates])
+        held_out_x = fold_scaler.transform(held_out_frame[fold_candidates])
+        fit_y = structured_survival(
+            fit_frame[event_col], fit_frame[time_col]
+        )
+        held_out_time = held_out_frame[time_col].to_numpy(float)
+        held_out_event = held_out_frame[event_col].to_numpy(bool)
+        fold_path = _fit_lasso_path(fit_x, fit_y)
+        fold_alpha_paths.append(np.asarray(fold_path.alphas_, dtype=float))
+        fold_penalty_paths.append(_relative_penalty_path(fold_path))
+        losses = np.full(len(fold_path.alphas_), np.nan, dtype=float)
+        for alpha_index, alpha in enumerate(fold_path.alphas_):
             try:
-                model = CoxnetSurvivalAnalysis(
-                    l1_ratio=1.0,
-                    alphas=[float(alpha)],
-                    normalize=False,
-                    max_iter=200000,
-                    tol=1e-8,
-                ).fit(fit_x, fit_y)
-                score = model.predict(held_out_x)
-                fold_losses[fold, alpha_index] = _negative_partial_log_likelihood(
+                score = fold_path.predict(held_out_x, alpha=float(alpha))
+                losses[alpha_index] = _negative_partial_log_likelihood(
                     held_out_time, held_out_event, score
                 )
             except Exception:
                 continue
+        fold_loss_rows.append(losses)
+        fold_assignments.extend(
+            {patient_col: str(patient_id), "cross_validation_fold": fold}
+            for patient_id in held_out_frame[patient_col]
+        )
+    common_path_length = min(
+        len(relative_penalties),
+        *(len(path) for path in fold_penalty_paths),
+        *(len(losses) for losses in fold_loss_rows),
+    )
+    if common_path_length == 0:
+        raise RuntimeError("LASSO-Cox cross-validation returned an empty common penalty path.")
+    relative_penalties = relative_penalties[:common_path_length]
+    alphas = alphas[:common_path_length]
+    for fold_path in fold_penalty_paths:
+        if not np.allclose(
+            fold_path[:common_path_length], relative_penalties, rtol=1e-7, atol=1e-12
+        ):
+            raise RuntimeError("Cross-validation folds returned incompatible penalty paths.")
+    fold_losses = np.vstack([losses[:common_path_length] for losses in fold_loss_rows])
     valid = np.isfinite(fold_losses).all(axis=0)
     if not valid.any():
         raise RuntimeError("LASSO-Cox cross-validation failed for every penalty value.")
@@ -229,18 +285,12 @@ def fit_radiomics_model(
         eligible = np.flatnonzero(
             valid & (mean_loss <= mean_loss[best_index] + standard_error[best_index])
         )
-        selected_alpha_index = int(eligible[np.argmax(alphas[eligible])])
+        selected_alpha_index = int(eligible[0])
     else:
         selected_alpha_index = best_index
     selected_alpha = float(alphas[selected_alpha_index])
-    selected_path = CoxnetSurvivalAnalysis(
-        l1_ratio=1.0,
-        alphas=[selected_alpha],
-        normalize=False,
-        max_iter=200000,
-        tol=1e-8,
-    ).fit(full_x, training_y)
-    path_coefficients = selected_path.coef_.reshape(-1)
+    selected_relative_penalty = float(relative_penalties[selected_alpha_index])
+    path_coefficients = path_model.coef_[:, selected_alpha_index]
     nonzero = np.flatnonzero(np.abs(path_coefficients) > 1e-10)
     if nonzero.size == 0:
         raise RuntimeError(
@@ -278,9 +328,33 @@ def fit_radiomics_model(
     )
     coefficients.to_csv(output / "radiomics_selected_features.csv", index=False)
     screen.to_csv(output / "radiomics_univariable_screen.csv", index=False)
+    pd.concat(fold_screen_rows, ignore_index=True).to_csv(
+        output / "radiomics_fold_screening.csv", index=False
+    )
+    pd.DataFrame(fold_assignments).sort_values("cross_validation_fold").to_csv(
+        output / "radiomics_cross_validation_assignments.csv", index=False
+    )
+    penalty_rows = []
+    for fold, (fold_alphas, fold_relative, fold_loss) in enumerate(
+        zip(fold_alpha_paths, fold_penalty_paths, fold_loss_rows, strict=True)
+    ):
+        penalty_rows.extend(
+            {
+                "fold": fold,
+                "alpha": float(alpha),
+                "relative_penalty": float(relative),
+                "negative_partial_log_likelihood": float(loss),
+                "included_in_common_path": index < common_path_length,
+            }
+            for index, (alpha, relative, loss) in enumerate(
+                zip(fold_alphas, fold_relative, fold_loss, strict=True)
+            )
+        )
+    pd.DataFrame(penalty_rows).to_csv(output / "radiomics_fold_penalty_losses.csv", index=False)
     cross_validation = pd.DataFrame(
         {
             "alpha": alphas,
+            "relative_penalty": relative_penalties,
             "mean_negative_partial_log_likelihood": mean_loss,
             "standard_error": standard_error,
             "selected": np.arange(len(alphas)) == selected_alpha_index,
@@ -293,6 +367,7 @@ def fit_radiomics_model(
             "scaler": final_scaler,
             "features": selected_features,
             "selected_alpha": selected_alpha,
+            "selected_relative_penalty": selected_relative_penalty,
             "training_cutoff": cutoff,
             "horizons_months": horizons,
             "training_patient_ids": training[patient_col].astype(str).tolist(),
@@ -306,8 +381,13 @@ def fit_radiomics_model(
                 "candidate_features": len(candidates),
                 "selected_features": len(selected_features),
                 "selected_alpha": selected_alpha,
+                "selected_relative_penalty": selected_relative_penalty,
                 "training_cutoff": cutoff,
                 "cross_validation_folds": folds,
+                "univariable_screening_repeated_within_each_fold": True,
+                "fold_candidate_features": [
+                    int(frame["passed_threshold"].sum()) for frame in fold_screen_rows
+                ],
             },
             indent=2,
         )

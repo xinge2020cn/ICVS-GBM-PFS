@@ -22,6 +22,7 @@ from .radiomics import extract_radiomics_features, fit_radiomics_model
 from .segmentation import (
     evaluate_segmentation_manifest,
     prepare_nnunet_dataset,
+    prepare_nnunet_inference,
     run_nnunet_prediction,
     run_nnunet_training,
 )
@@ -96,6 +97,18 @@ def command_train_nnunet(args: argparse.Namespace) -> None:
         preprocessed=args.nnunet_preprocessed,
         results=args.nnunet_results,
         trainer=args.trainer,
+    )
+
+
+def command_prepare_nnunet_inference(args: argparse.Namespace) -> None:
+    frame, config = _load_manifest_and_config(args)
+    validate_manifest(frame, config, require_paths=PROCESSED_IMAGE_COLUMNS)
+    prepare_nnunet_inference(
+        frame,
+        config,
+        input_dir=args.input_dir,
+        prediction_dir=args.prediction_dir,
+        output_manifest=args.output_manifest,
     )
 
 
@@ -358,6 +371,14 @@ def build_parser() -> argparse.ArgumentParser:
     train_nnunet.add_argument("--nnunet-results", required=True, type=Path)
     train_nnunet.add_argument("--trainer", default="nnUNetTrainer")
     train_nnunet.set_defaults(function=command_train_nnunet)
+
+    prepare_inference = subparsers.add_parser("prepare-nnunet-inference")
+    _common_parser(prepare_inference)
+    prepare_inference.add_argument("--manifest", required=True, type=Path)
+    prepare_inference.add_argument("--input-dir", required=True, type=Path)
+    prepare_inference.add_argument("--prediction-dir", required=True, type=Path)
+    prepare_inference.add_argument("--output-manifest", required=True, type=Path)
+    prepare_inference.set_defaults(function=command_prepare_nnunet_inference)
 
     predict_nnunet = subparsers.add_parser("predict-nnunet")
     _common_parser(predict_nnunet)

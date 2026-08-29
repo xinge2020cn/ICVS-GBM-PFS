@@ -36,7 +36,7 @@ def _same_image_geometry(first: sitk.Image, second: sitk.Image) -> bool:
     )
 
 
-def rigid_register(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
+def rigid_register(moving: sitk.Image, fixed: sitk.Image, *, seed: int) -> sitk.Image:
     """Rigidly register one MRI sequence to the anatomical reference."""
 
     moving_float = sitk.Cast(moving, sitk.sitkFloat32)
@@ -50,7 +50,7 @@ def rigid_register(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
     registration = sitk.ImageRegistrationMethod()
     registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     registration.SetMetricSamplingStrategy(registration.RANDOM)
-    registration.SetMetricSamplingPercentage(0.20, seed=2026)
+    registration.SetMetricSamplingPercentage(0.20, seed=int(seed))
     registration.SetInterpolator(sitk.sitkLinear)
     registration.SetOptimizerAsGradientDescent(
         learningRate=1.0,
@@ -181,6 +181,7 @@ def process_subject(
     patient_id_column: str,
     spacing_xyz: tuple[float, float, float],
     margin_mm: float,
+    seed: int,
 ) -> dict[str, str]:
     """Preprocess all MRI sequences and write one patient-level output set."""
 
@@ -205,7 +206,7 @@ def process_subject(
         raise ValueError(f"Tumor mask contains no foreground voxels for patient {patient_id}.")
     registered = {"ce_t1": reference}
     for modality in ("t1", "t2", "flair"):
-        registered[modality] = rigid_register(images[modality], reference)
+        registered[modality] = rigid_register(images[modality], reference, seed=seed)
     corrected = {
         modality: n4_bias_correct(image, brain_mask) for modality, image in registered.items()
     }
@@ -260,6 +261,7 @@ def preprocess_manifest(
                 patient_id_column=config.column("patient_id"),
                 spacing_xyz=spacing,
                 margin_mm=margin,
+                seed=config.seed,
             )
         )
     result = pd.concat([frame.reset_index(drop=True), pd.DataFrame(derived)], axis=1)

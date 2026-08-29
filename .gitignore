@@ -4,6 +4,7 @@
 !/.github/
 !/.github/**
 !/LICENSE
+!/CITATION.cff
 !/README.md
 !/pyproject.toml
 !/configs/
