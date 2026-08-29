@@ -179,6 +179,8 @@ def load_config(path: str | Path) -> StudyConfig:
     )
     segmentation = values["segmentation"]
     _positive_integer(segmentation.get("dataset_id"), "The nnU-Net dataset identifier")
+    if segmentation.get("implementation_version") != "2.4.2":
+        raise ValueError("The locked nnU-Net implementation version must be 2.4.2.")
     if not isinstance(segmentation.get("configuration"), str) or not segmentation[
         "configuration"
     ].strip():
@@ -189,7 +191,42 @@ def load_config(path: str | Path) -> StudyConfig:
         segmentation.get("patch_shape_dhw"), "The nnU-Net patch shape", length=3
     )
     _positive_integer(segmentation.get("epochs"), "The nnU-Net epoch count")
+    _positive_integer(
+        segmentation.get("training_iterations_per_epoch"),
+        "The nnU-Net training iterations per epoch",
+    )
+    _positive_integer(
+        segmentation.get("validation_iterations_per_epoch"),
+        "The nnU-Net validation iterations per epoch",
+    )
     _positive_integer(segmentation.get("batch_size"), "The nnU-Net batch size")
+    _finite_number(
+        segmentation.get("initial_learning_rate"),
+        "The nnU-Net initial learning rate",
+        minimum=0.0,
+    )
+    _finite_number(
+        segmentation.get("nesterov_momentum"),
+        "The nnU-Net Nesterov momentum",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    _finite_number(
+        segmentation.get("weight_decay"),
+        "The nnU-Net weight decay",
+        minimum=0.0,
+        minimum_inclusive=True,
+    )
+    _finite_number(
+        segmentation.get("foreground_oversampling_fraction"),
+        "The nnU-Net foreground oversampling fraction",
+        minimum=0.0,
+        maximum=1.0,
+        minimum_inclusive=True,
+    )
+    for name in ("deep_supervision", "automatic_mixed_precision"):
+        if not isinstance(segmentation.get(name), bool):
+            raise ValueError(f"The nnU-Net {name.replace('_', ' ')} setting must be Boolean.")
     _finite_number(
         segmentation.get("surface_dice_tolerance_mm"),
         "The surface Dice tolerance",

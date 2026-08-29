@@ -11,6 +11,12 @@ def test_study_config_contains_distinct_manifest_mappings() -> None:
     config = load_config(CONFIG_PATH)
     assert config.cohort("training") != config.cohort("spatial_validation")
     assert config.column("patient_id") != config.column("center_id")
+    segmentation = config.section("segmentation")
+    assert segmentation["implementation_version"] == "2.4.2"
+    assert segmentation["training_iterations_per_epoch"] == 250
+    assert segmentation["validation_iterations_per_epoch"] == 50
+    assert segmentation["nesterov_momentum"] == pytest.approx(0.99)
+    assert segmentation["foreground_oversampling_fraction"] == pytest.approx(0.33)
 
 
 def test_config_rejects_duplicate_cohort_labels(tmp_path: Path) -> None:

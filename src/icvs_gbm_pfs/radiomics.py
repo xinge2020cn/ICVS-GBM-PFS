@@ -1,4 +1,4 @@
-"""IBSI-aligned feature extraction and leakage-safe radiomics model fitting."""
+"""IBSI-aligned feature extraction and study-reported radiomics model fitting."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import SimpleITK as sitk
+import yaml
 from lifelines import CoxPHFitter
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -16,6 +18,45 @@ from sksurv.linear_model import CoxnetSurvivalAnalysis, CoxPHSurvivalAnalysis
 from .config import StudyConfig
 from .survival import structured_survival
 from .training import survival_strata
+
+
+def _validated_radiomics_parameter_path(parameter_file: str | Path) -> Path:
+    """Require feature extraction to retain the preprocessed image grid."""
+
+    path = Path(parameter_file).resolve()
+    parameters = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(parameters, dict):
+        raise ValueError("The radiomics parameter file must contain a mapping.")
+    settings = parameters.get("setting", {})
+    if not isinstance(settings, dict):
+        raise ValueError("The radiomics setting section must contain a mapping.")
+    if settings.get("resampledPixelSpacing") is not None:
+        raise ValueError(
+            "Radiomics-specific resampling is not permitted; use the preprocessed image grid."
+        )
+    return path
+
+
+def _validate_radiomics_grid(
+    image: sitk.Image,
+    reference: sitk.Image,
+    expected_spacing: tuple[float, float, float],
+    *,
+    label: str,
+) -> None:
+    """Verify that an image occupies the study-defined radiomics grid."""
+
+    if not np.allclose(image.GetSpacing(), expected_spacing, rtol=0.0, atol=1e-6):
+        raise ValueError(f"{label} does not use the study-defined preprocessed spacing.")
+    if image.GetSize() != reference.GetSize():
+        raise ValueError(f"{label} and the VOI do not have identical image dimensions.")
+    for name, observed, expected in (
+        ("origin", image.GetOrigin(), reference.GetOrigin()),
+        ("direction", image.GetDirection(), reference.GetDirection()),
+        ("spacing", image.GetSpacing(), reference.GetSpacing()),
+    ):
+        if not np.allclose(observed, expected, rtol=0.0, atol=1e-6):
+            raise ValueError(f"{label} and the VOI do not have identical {name}.")
 
 
 def _radiomic_feature_name(modality: str, name: str) -> str:
@@ -50,14 +91,34 @@ def extract_radiomics_features(
     missing = [column for column in [patient_col, *path_columns] if column not in frame]
     if missing:
         raise ValueError(f"Manifest is missing radiomics columns: {', '.join(missing)}")
-    extractor = featureextractor.RadiomicsFeatureExtractor(str(Path(parameter_file).resolve()))
+    expected_spacing = tuple(
+        float(value) for value in config.section("preprocessing")["output_spacing_mm"]
+    )
+    if len(expected_spacing) != 3 or not np.isfinite(expected_spacing).all():
+        raise ValueError("The study-defined radiomics spacing must contain three finite values.")
+    parameter_path = _validated_radiomics_parameter_path(parameter_file)
+    extractor = featureextractor.RadiomicsFeatureExtractor(str(parameter_path))
     rows: list[dict[str, object]] = []
     for row in frame.to_dict(orient="records"):
         values: dict[str, object] = {patient_col: str(row[patient_col])}
+        mask = sitk.ReadImage(str(row["voi_path"]), sitk.sitkUInt8)
+        _validate_radiomics_grid(
+            mask,
+            mask,
+            expected_spacing,
+            label="The tumor-peritumoral VOI",
+        )
         for modality in ("t1", "t2", "flair", "ce_t1"):
+            image = sitk.ReadImage(str(row[f"preprocessed_{modality}_path"]), sitk.sitkFloat32)
+            _validate_radiomics_grid(
+                image,
+                mask,
+                expected_spacing,
+                label=f"The {modality} image",
+            )
             features = extractor.execute(
-                str(row[f"preprocessed_{modality}_path"]),
-                str(row["voi_path"]),
+                image,
+                mask,
                 label=1,
             )
             for name, value in features.items():
@@ -215,29 +276,12 @@ def fit_radiomics_model(
     fold_loss_rows: list[np.ndarray] = []
     fold_alpha_paths: list[np.ndarray] = []
     fold_penalty_paths: list[np.ndarray] = []
-    fold_screen_rows: list[pd.DataFrame] = []
     fold_assignments: list[dict[str, object]] = []
     for fold, (fit_indices, held_out_indices) in enumerate(splitter.split(training, strata)):
         fit_frame = training.iloc[fit_indices]
         held_out_frame = training.iloc[held_out_indices]
-        fold_screen = _univariable_screen(
-            fit_frame,
-            feature_columns,
-            time_column=time_col,
-            event_column=event_col,
-        )
-        fold_screen.insert(0, "fold", fold)
-        fold_screen["passed_threshold"] = fold_screen["p_value"] < threshold
-        fold_screen_rows.append(fold_screen)
-        fold_candidates = fold_screen.loc[fold_screen["passed_threshold"], "feature"].tolist()
-        if not fold_candidates:
-            raise RuntimeError(
-                f"No radiomic features passed the prespecified threshold in cross-validation "
-                f"fold {fold}."
-            )
-        fold_scaler = StandardScaler().fit(fit_frame[fold_candidates])
-        fit_x = fold_scaler.transform(fit_frame[fold_candidates])
-        held_out_x = fold_scaler.transform(held_out_frame[fold_candidates])
+        fit_x = full_scaler.transform(fit_frame[candidates])
+        held_out_x = full_scaler.transform(held_out_frame[candidates])
         fit_y = structured_survival(
             fit_frame[event_col], fit_frame[time_col]
         )
@@ -328,9 +372,6 @@ def fit_radiomics_model(
     )
     coefficients.to_csv(output / "radiomics_selected_features.csv", index=False)
     screen.to_csv(output / "radiomics_univariable_screen.csv", index=False)
-    pd.concat(fold_screen_rows, ignore_index=True).to_csv(
-        output / "radiomics_fold_screening.csv", index=False
-    )
     pd.DataFrame(fold_assignments).sort_values("cross_validation_fold").to_csv(
         output / "radiomics_cross_validation_assignments.csv", index=False
     )
@@ -384,10 +425,8 @@ def fit_radiomics_model(
                 "selected_relative_penalty": selected_relative_penalty,
                 "training_cutoff": cutoff,
                 "cross_validation_folds": folds,
-                "univariable_screening_repeated_within_each_fold": True,
-                "fold_candidate_features": [
-                    int(frame["passed_threshold"].sum()) for frame in fold_screen_rows
-                ],
+                "univariable_screening_population": "complete_training_cohort",
+                "standardization_population": "complete_training_cohort",
             },
             indent=2,
         )

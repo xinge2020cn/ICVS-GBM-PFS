@@ -7,6 +7,7 @@
 !/CITATION.cff
 !/README.md
 !/pyproject.toml
+!/MANIFEST.in
 !/configs/
 !/configs/**
 !/src/

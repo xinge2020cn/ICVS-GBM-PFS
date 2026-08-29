@@ -161,6 +161,7 @@ def fit_icvs_model(
         "training_cutoff": cutoff,
         "horizons_months": horizons,
         "training_patient_ids": training[patient_col].astype(str).tolist(),
+        "explanation_background_features": training_features,
     }
     joblib.dump(artifact, output / "icvs_model.joblib")
     (output / "icvs_model_metadata.json").write_text(
@@ -175,6 +176,7 @@ def fit_icvs_model(
                 "horizons_months": horizons.tolist(),
                 "training_predictions": "out_of_bag",
                 "validation_predictions": "locked_full_forest",
+                "explanation_background": "complete_training_cohort",
             },
             indent=2,
         )

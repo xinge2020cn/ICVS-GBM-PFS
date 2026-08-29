@@ -3,12 +3,17 @@ scope: Versions explicitly reported for the study analysis
 note: Unreported package versions are intentionally not reconstructed.
 
 python: 3.10.13
+r: 4.5.3
 packages:
   numpy: 1.26.4
   SimpleITK: 2.3.1
   torch: 2.7.1
   nnunetv2: 2.4.2
   pyradiomics: 3.1.0
+data_resources:
+  gencode_release: 44
+  msigdb_hallmark_release: "2025.1"
+  lm22_populations: 22
 compute:
   cuda: 12.8
   gpu: NVIDIA GeForce RTX 5090

@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
+import SimpleITK as sitk
 import yaml
 from sksurv.linear_model import CoxnetSurvivalAnalysis
 
@@ -10,6 +12,8 @@ from icvs_gbm_pfs.config import StudyConfig, load_config
 from icvs_gbm_pfs.radiomics import (
     _radiomic_feature_name,
     _relative_penalty_path,
+    _validate_radiomics_grid,
+    _validated_radiomics_parameter_path,
     fit_radiomics_model,
 )
 
@@ -29,10 +33,44 @@ def test_intensity_and_texture_features_retain_modality() -> None:
     )
 
 
-def test_radiomics_configuration_uses_isotropic_resampling() -> None:
-    path = Path(__file__).parents[1] / "configs" / "radiomics.yaml"
-    parameters = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert parameters["setting"]["resampledPixelSpacing"] == [1.0, 1.0, 1.0]
+def test_radiomics_configuration_matches_study_spacing() -> None:
+    config_dir = Path(__file__).parents[1] / "configs"
+    parameters = yaml.safe_load((config_dir / "radiomics.yaml").read_text(encoding="utf-8"))
+    study = yaml.safe_load((config_dir / "study.yaml").read_text(encoding="utf-8"))
+    expected_spacing = [1.0, 1.0, 5.0]
+    assert study["preprocessing"]["output_spacing_mm"] == expected_spacing
+    assert "resampledPixelSpacing" not in parameters["setting"]
+    assert "interpolator" not in parameters["setting"]
+    assert _validated_radiomics_parameter_path(config_dir / "radiomics.yaml").is_file()
+
+
+def test_radiomics_parameter_file_rejects_additional_resampling(tmp_path: Path) -> None:
+    path = tmp_path / "radiomics.yaml"
+    path.write_text("setting:\n  resampledPixelSpacing: [1.0, 1.0, 5.0]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Radiomics-specific resampling"):
+        _validated_radiomics_parameter_path(path)
+
+
+def test_radiomics_grid_validation_requires_matching_geometry() -> None:
+    reference = sitk.Image([4, 4, 2], sitk.sitkUInt8)
+    reference.SetSpacing((1.0, 1.0, 5.0))
+    image = sitk.Image([4, 4, 2], sitk.sitkFloat32)
+    image.SetSpacing((1.0, 1.0, 5.0))
+    _validate_radiomics_grid(image, reference, (1.0, 1.0, 5.0), label="MRI")
+    image.SetOrigin((0.0, 0.0, 1.0))
+    with pytest.raises(ValueError, match="identical origin"):
+        _validate_radiomics_grid(image, reference, (1.0, 1.0, 5.0), label="MRI")
+
+
+def test_radiomics_parameters_load_with_study_reported_implementation() -> None:
+    radiomics = pytest.importorskip("radiomics")
+    from radiomics import featureextractor
+
+    assert radiomics.__version__ in {"3.1.0", "0+unknown"}
+    extractor = featureextractor.RadiomicsFeatureExtractor(
+        str(Path(__file__).parents[1] / "configs" / "radiomics.yaml")
+    )
+    assert extractor.settings["binWidth"] == pytest.approx(0.25)
 
 
 def test_relative_penalty_path_is_normalized_and_decreasing() -> None:
@@ -41,7 +79,7 @@ def test_relative_penalty_path_is_normalized_and_decreasing() -> None:
     assert np.allclose(_relative_penalty_path(model), [1.0, 0.5, 0.25])
 
 
-def test_radiomics_screening_is_recorded_for_every_cross_validation_fold(
+def test_radiomics_screening_and_cross_validation_follow_locked_sequence(
     tmp_path: Path,
 ) -> None:
     count = 90
@@ -81,10 +119,14 @@ def test_radiomics_screening_is_recorded_for_every_cross_validation_fold(
 
     scores = fit_radiomics_model(manifest, features, config, tmp_path)
 
-    screening = pd.read_csv(tmp_path / "radiomics_fold_screening.csv")
+    screening = pd.read_csv(tmp_path / "radiomics_univariable_screen.csv")
     assignments = pd.read_csv(tmp_path / "radiomics_cross_validation_assignments.csv")
-    assert set(screening["fold"]) == {0, 1, 2}
-    assert screening.groupby("fold")["passed_threshold"].any().all()
+    assert "fold" not in screening
+    assert set(screening["feature"]) == {
+        "feature_signal",
+        "feature_noise_1",
+        "feature_noise_2",
+    }
     assert len(assignments) == 60
     assert assignments["patient_id"].is_unique
     assert scores["radiomics_score"].notna().all()

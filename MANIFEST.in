@@ -1,0 +1,9 @@
+include CITATION.cff
+include LICENSE
+include METHODS_CROSSWALK.md
+include README.md
+recursive-include R *.R
+recursive-include configs *.json *.yaml
+recursive-include deployment *.json *.md *.py *.txt Dockerfile
+recursive-include environment *.yaml
+recursive-include tests *.py

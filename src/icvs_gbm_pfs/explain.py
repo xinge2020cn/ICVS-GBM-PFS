@@ -15,16 +15,17 @@ from sksurv.ensemble import RandomSurvivalForest
 from .config import StudyConfig
 
 
-def _progression_probability(
+def _progression_probabilities(
     model: RandomSurvivalForest,
     features: np.ndarray,
-    horizon: float,
+    horizons: np.ndarray,
 ) -> np.ndarray:
     survival = model.predict_survival_function(features, return_array=True)
-    index = int(np.searchsorted(model.unique_times_, horizon, side="right") - 1)
-    if index < 0:
-        return np.zeros(len(features), dtype=float)
-    return 1.0 - survival[:, index]
+    indices = np.searchsorted(model.unique_times_, horizons, side="right") - 1
+    result = np.zeros((len(features), len(horizons)), dtype=float)
+    available = indices >= 0
+    result[:, available] = 1.0 - survival[:, indices[available]]
+    return result
 
 
 def _feature_matrix(
@@ -74,6 +75,112 @@ def select_explanation_patients(
         indices = frame.index[frame[cohort_col].eq(cohort)].to_numpy()
         selected.extend(rng.choice(indices, size=count, replace=False).tolist())
     return frame.loc[selected].sort_index().reset_index(drop=True)
+
+
+def _bootstrap_shapley_intervals(
+    values: pd.DataFrame,
+    patient_column: str,
+    *,
+    resamples: int,
+    seed: int,
+) -> pd.DataFrame:
+    """Calculate patient-level bootstrap intervals for mean absolute Shapley values."""
+
+    if resamples <= 0:
+        raise ValueError("Shapley bootstrap resamples must be greater than zero.")
+    required = {patient_column, "horizon_months", "feature", "shapley_value"}
+    missing = sorted(required.difference(values.columns))
+    if missing:
+        raise ValueError(f"Shapley values are missing columns: {', '.join(missing)}")
+    matrix = values.assign(absolute_shapley=values["shapley_value"].abs()).pivot(
+        index=patient_column,
+        columns=["horizon_months", "feature"],
+        values="absolute_shapley",
+    )
+    if matrix.empty or matrix.isna().any().any():
+        raise ValueError("Every explained patient must have one value per horizon and feature.")
+    rng = np.random.default_rng(seed)
+    observed = matrix.to_numpy(dtype=float)
+    bootstrap = np.empty((resamples, observed.shape[1]), dtype=float)
+    for index in range(resamples):
+        selected = rng.integers(0, observed.shape[0], size=observed.shape[0])
+        bootstrap[index] = observed[selected].mean(axis=0)
+    intervals = matrix.columns.to_frame(index=False)
+    intervals["mean_absolute_shapley_ci_low"] = np.percentile(bootstrap, 2.5, axis=0)
+    intervals["mean_absolute_shapley_ci_high"] = np.percentile(bootstrap, 97.5, axis=0)
+    return intervals
+
+
+def _local_linear_smooth(
+    feature_values: np.ndarray,
+    shapley_values: np.ndarray,
+    grid: np.ndarray,
+    bandwidth: float,
+) -> np.ndarray:
+    estimates = np.empty(len(grid), dtype=float)
+    for index, location in enumerate(grid):
+        centered = feature_values - location
+        weights = np.exp(-0.5 * np.square(centered / bandwidth))
+        design = np.column_stack([np.ones(len(centered)), centered])
+        coefficients = np.linalg.pinv(design.T @ (weights[:, None] * design)) @ (
+            design.T @ (weights * shapley_values)
+        )
+        estimates[index] = coefficients[0]
+    return estimates
+
+
+def _shapley_dependence_curve(
+    values: pd.DataFrame,
+    patient_column: str,
+    *,
+    feature: str,
+    horizon: float,
+    resamples: int,
+    seed: int,
+    grid_points: int = 100,
+) -> pd.DataFrame:
+    """Estimate a patient-bootstrap local-linear Shapley dependence curve."""
+
+    selected = values.loc[
+        values["feature"].eq(feature) & values["horizon_months"].eq(horizon),
+        [patient_column, "feature_value", "shapley_value"],
+    ].copy()
+    if selected.empty or selected[patient_column].duplicated().any():
+        raise ValueError("Shapley dependence requires one selected row per patient.")
+    feature_values = selected["feature_value"].to_numpy(dtype=float)
+    shapley_values = selected["shapley_value"].to_numpy(dtype=float)
+    if not np.isfinite(feature_values).all() or not np.isfinite(shapley_values).all():
+        raise ValueError("Shapley dependence values must be finite.")
+    if len(feature_values) < 3 or grid_points < 2 or resamples <= 0:
+        raise ValueError("Shapley dependence requires at least three patients and two grid points.")
+    standard_deviation = float(np.std(feature_values, ddof=1))
+    bandwidth = 1.06 * standard_deviation * len(feature_values) ** (-0.20)
+    if not np.isfinite(bandwidth) or bandwidth <= 0:
+        raise ValueError("Shapley dependence requires nonconstant feature values.")
+    lower, upper = np.percentile(feature_values, [2.5, 97.5])
+    grid = np.linspace(lower, upper, grid_points)
+    estimate = _local_linear_smooth(feature_values, shapley_values, grid, bandwidth)
+    rng = np.random.default_rng(seed)
+    bootstrap = np.empty((resamples, grid_points), dtype=float)
+    for index in range(resamples):
+        sampled = rng.integers(0, len(feature_values), size=len(feature_values))
+        bootstrap[index] = _local_linear_smooth(
+            feature_values[sampled],
+            shapley_values[sampled],
+            grid,
+            bandwidth,
+        )
+    return pd.DataFrame(
+        {
+            "feature": feature,
+            "horizon_months": horizon,
+            "feature_value": grid,
+            "shapley_value_smoothed": estimate,
+            "ci_low": np.percentile(bootstrap, 2.5, axis=0),
+            "ci_high": np.percentile(bootstrap, 97.5, axis=0),
+            "bandwidth": bandwidth,
+        }
+    )
 
 
 def exact_time_dependent_shapley(
@@ -129,16 +236,18 @@ def exact_time_dependent_shapley(
     factorial = math.factorial
     rows = []
     for patient_index, patient_features in enumerate(explained):
-        for horizon in horizons:
-            coalition_values: dict[int, float] = {}
-            for coalition_bits in range(1 << feature_count):
-                combined = background.copy()
-                for feature_index in range(feature_count):
-                    if coalition_bits & (1 << feature_index):
-                        combined[:, feature_index] = patient_features[feature_index]
-                coalition_values[coalition_bits] = float(
-                    _progression_probability(model, combined, float(horizon)).mean()
-                )
+        coalition_values: dict[int, np.ndarray] = {}
+        for coalition_bits in range(1 << feature_count):
+            combined = background.copy()
+            for feature_index in range(feature_count):
+                if coalition_bits & (1 << feature_index):
+                    combined[:, feature_index] = patient_features[feature_index]
+            coalition_values[coalition_bits] = _progression_probabilities(
+                model,
+                combined,
+                horizons,
+            ).mean(axis=0)
+        for horizon_index, horizon in enumerate(horizons):
             shapley_values = np.zeros(feature_count, dtype=float)
             for feature_index in range(feature_count):
                 for subset_size in range(feature_count):
@@ -153,10 +262,11 @@ def exact_time_dependent_shapley(
                             / factorial(feature_count)
                         )
                         shapley_values[feature_index] += weight * (
-                            coalition_values[bits | (1 << feature_index)] - coalition_values[bits]
+                            coalition_values[bits | (1 << feature_index)][horizon_index]
+                            - coalition_values[bits][horizon_index]
                         )
-            baseline = coalition_values[0]
-            prediction = coalition_values[(1 << feature_count) - 1]
+            baseline = float(coalition_values[0][horizon_index])
+            prediction = float(coalition_values[(1 << feature_count) - 1][horizon_index])
             additivity_error = float(abs(baseline + shapley_values.sum() - prediction))
             if additivity_error > 1e-8:
                 raise RuntimeError(
@@ -182,6 +292,13 @@ def exact_time_dependent_shapley(
         .groupby(["horizon_months", "feature"], as_index=False)
         .agg(mean_absolute_shapley=("absolute_shapley", "mean"))
     )
+    intervals = _bootstrap_shapley_intervals(
+        values,
+        patient_col,
+        resamples=int(config.section("evaluation")["bootstrap_resamples"]),
+        seed=config.seed,
+    )
+    summary = summary.merge(intervals, on=["horizon_months", "feature"], validate="one_to_one")
     contribution_total = summary.groupby("horizon_months")["mean_absolute_shapley"].transform(
         "sum"
     )
@@ -191,8 +308,17 @@ def exact_time_dependent_shapley(
         out=np.full(len(summary), np.nan, dtype=float),
         where=contribution_total.to_numpy(float) > 0,
     )
+    dependence = _shapley_dependence_curve(
+        values,
+        patient_col,
+        feature="vit_score_standardized",
+        horizon=12.0,
+        resamples=int(config.section("evaluation")["bootstrap_resamples"]),
+        seed=config.seed + 1,
+    )
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     values.to_csv(output / "icvs_time_dependent_shapley_values.csv", index=False)
     summary.to_csv(output / "icvs_time_dependent_shapley_summary.csv", index=False)
+    dependence.to_csv(output / "icvs_vit_12m_dependence.csv", index=False)
     return values, summary

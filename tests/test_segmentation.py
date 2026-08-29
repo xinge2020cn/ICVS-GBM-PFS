@@ -10,6 +10,7 @@ from icvs_gbm_pfs.segmentation import (
     assemble_segmentation_manifests,
     collect_nnunet_oof_predictions,
     prepare_nnunet_inference,
+    segmentation_bland_altman,
     segmentation_metrics,
 )
 
@@ -42,6 +43,22 @@ def test_segmentation_metrics_reject_invalid_spacing() -> None:
     mask = np.ones((2, 2, 2), dtype=bool)
     with pytest.raises(ValueError, match="spacing"):
         segmentation_metrics(mask, mask, (1.0, 0.0, 1.0))
+
+
+def test_volume_agreement_reports_bias_and_limits_by_cohort() -> None:
+    patient_metrics = pd.DataFrame(
+        {
+            "cohort": ["training", "training"],
+            "reference_volume_ml": [10.0, 20.0],
+            "prediction_volume_ml": [12.0, 18.0],
+            "signed_relative_volume_error": [0.20, -0.10],
+        }
+    )
+    result = segmentation_bland_altman(patient_metrics, "cohort")
+    absolute = result.loc[result["scale"].eq("absolute_volume")].iloc[0]
+    assert absolute["bias"] == pytest.approx(0.0)
+    assert absolute["standard_deviation"] == pytest.approx(np.sqrt(8.0))
+    assert set(result["scale"]) == {"absolute_volume", "relative_volume"}
 
 
 def test_prepare_nnunet_inference_writes_validation_mapping(tmp_path: Path) -> None:

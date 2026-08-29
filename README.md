@@ -30,6 +30,12 @@ python -m pip install -e ".[radiomics,segmentation,test]"
 
 PyTorch must match the locally installed CUDA runtime. The study configuration records the framework-level parameters, while each cross-fitting run writes an `environment.json` file containing the installed package versions and compute device.
 
+The radiomics extra is pinned to the official PyRadiomics 3.1.0 release commit because the
+corresponding PyPI source archive publishes inconsistent package metadata. The commit pin
+keeps installation reproducible while retaining the study-reported implementation. Building
+this release from source requires a C/C++ compiler; on Windows, install the Microsoft C++
+Build Tools before installing the radiomics extra.
+
 The biological analysis requires R and the following packages:
 
 - Bioconductor: `DESeq2`, `fgsea`, and `GSVA`
@@ -72,6 +78,19 @@ icvs-gbm-pfs validate-manifest \
   --paths raw
 ```
 
+The cohort-summary command produces the source rows for baseline characteristics, event
+counts, Kaplan-Meier median progression-free survival, reverse Kaplan-Meier follow-up, and
+the prespecified three-cohort comparisons. The nested biological subset is summarized as a
+separate analysis population and is not included as a fourth independent cohort.
+It writes `cohort_characteristics.csv` and `cohort_comparisons.csv`.
+
+```bash
+icvs-gbm-pfs summarize-cohorts \
+  --config configs/study.yaml \
+  --manifest "$ICVS_GBM_PFS_MANIFEST" \
+  --output-dir "$ICVS_GBM_PFS_COHORT_RESULTS"
+```
+
 ## MRI preprocessing
 
 The preprocessing command rigidly registers T1-weighted, T2-weighted, and T2-FLAIR volumes to contrast-enhanced T1-weighted imaging; applies N4 bias-field correction; uses the supplied brain mask for skull exclusion; resamples all volumes to 1.0 x 1.0 x 5.0 mm; performs patient- and sequence-specific z-standardization; and builds the combined tumor-peritumoral VOI.
@@ -86,7 +105,7 @@ icvs-gbm-pfs preprocess \
 
 ## Tumor-core segmentation
 
-Only training-cohort masks are copied into the nnU-Net development directory. Planning, preprocessing, and all five folds use explicit storage locations. Validation cohorts are processed only by the locked five-fold ensemble.
+Only training-cohort masks are copied into the nnU-Net development directory. Planning, preprocessing, and all five folds use explicit storage locations. The locked configuration records the study-reported epoch, iteration, optimizer, oversampling, deep-supervision, and mixed-precision settings and requires nnU-Net 2.4.2. Validation cohorts are processed only by the locked five-fold ensemble.
 
 ```bash
 icvs-gbm-pfs prepare-nnunet \
@@ -133,8 +152,10 @@ icvs-gbm-pfs assemble-segmentation-manifest \
   --output-manifest "$ICVS_GBM_PFS_SEGMENTATION_ALL_MANIFEST"
 ```
 
-Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, and patient-level volume pairs for Bland-Altman analysis.
+Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, patient-level volume pairs, and cohort-level Bland-Altman bias and 95% limits of agreement.
 Cases without predicted foreground retain infinite patient-level HD95 values. Cohort HD95 summaries report the evaluable and nonfinite case counts separately and calculate intervals only from finite distances.
+The command writes `segmentation_patient_metrics.csv`, `segmentation_summary.csv`, and
+`segmentation_bland_altman.csv`.
 
 ```bash
 icvs-gbm-pfs evaluate-segmentation \
@@ -145,7 +166,7 @@ icvs-gbm-pfs evaluate-segmentation \
 
 ## Radiomics
 
-`configs/radiomics.yaml` fixes radiomics-only 1.0-mm isotropic resampling, the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Modality-independent shape features are retained once, while first-order and texture features remain sequence-specific. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. Within each cross-validation split, univariable screening and standardization are refitted using only that split's fitting patients. Fold-specific LASSO-Cox paths are compared by relative penalty position, the penalty is selected with the one-standard-error rule, and the final screened multivariable Cox model is fitted once in the complete training cohort.
+`configs/radiomics.yaml` retains the study-wide 1.0 x 1.0 x 5.0 mm preprocessed grid without an additional radiomics-specific resampling step and fixes the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. The extraction command verifies the spacing and physical geometry of every registered sequence and VOI before processing. Extraction uses the combined VOI and all four registered sequences. Modality-independent shape features are retained once, while first-order and texture features remain sequence-specific. Univariable screening and standardization are estimated in the complete training cohort and applied unchanged to locked cohorts. Fold-specific LASSO-Cox paths are compared by relative penalty position during patient-level ten-fold cross-validation, the penalty is selected with the one-standard-error rule, and the final screened multivariable Cox model is fitted once in the complete training cohort.
 
 ```bash
 icvs-gbm-pfs extract-radiomics \
@@ -240,9 +261,14 @@ icvs-gbm-pfs evaluate \
   --output-dir "$ICVS_GBM_PFS_EVALUATION_RESULTS"
 ```
 
-Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, IPCW Brier scores, integrated Brier score, grouped 12-month calibration, locked-median Kaplan-Meier stratification, complete unadjusted and adjusted Cox tables, rank-based Schoenfeld residual tests of proportional hazards, and paired patient-level bootstrap comparisons. Benjamini-Hochberg adjustments are reported for model-wise risk-stratification tests within each cohort and pairwise model comparisons within each cohort and metric. The biological subset is labeled as nested and is never reported as independent validation. The workflow evaluates prognostic performance; it does not claim that a clinical decision threshold or net benefit has been established.
+Evaluation includes Harrell concordance, dynamic AUC from 6 to 36 months, cumulative/dynamic ROC coordinates, IPCW Brier scores, integrated Brier score, grouped 12-month calibration, locked-median Kaplan-Meier curves with numbers at risk, complete unadjusted and adjusted Cox tables, rank-based Schoenfeld residual tests of proportional hazards, and paired patient-level bootstrap comparisons. Benjamini-Hochberg adjustments are reported for model-wise risk-stratification tests within each cohort and pairwise model comparisons within each cohort and metric. The biological subset is labeled as nested and is never reported as independent validation. The workflow evaluates prognostic performance; it does not claim that a clinical decision threshold or net benefit has been established.
+Each analysis table is written separately, including `performance.csv`, `time_dependent_roc.csv`,
+`calibration.csv`, `kaplan_meier_curves.csv`, `risk_stratification.csv`,
+`cox_regression.csv`, and `pairwise_comparisons.csv`.
 
-Time-dependent ICVS interpretation evaluates every coalition of the four predictors against the complete training-cohort background and verifies additivity for every patient and horizon.
+Time-dependent ICVS interpretation evaluates every coalition of the four predictors against the complete training-cohort background, verifies additivity for every patient and horizon, and reports patient-level bootstrap 95% confidence intervals for mean absolute contributions. The 12-month ViT dependence output uses Gaussian local-linear smoothing over the central 95% of observed standardized scores and patient-level bootstrap confidence bands.
+The command writes patient-level values, global summaries, and the dependence curve as three
+separate CSV files in the requested output directory.
 
 ```bash
 icvs-gbm-pfs explain-icvs \
@@ -266,7 +292,18 @@ icvs-gbm-pfs prepare-biological-cohort \
   --output "$ICVS_GBM_PFS_BIOLOGICAL_COHORT"
 ```
 
-The R workflow restricts counts to GENCODE protein-coding genes, applies the prespecified expression filter, fits DESeq2, runs Hallmark preranked GSEA and ssGSEA, computes groupwise and continuous pathway statistics with separate FDR families, and evaluates the prespecified total-macrophage aggregate separately from the 22 exploratory LM22 populations.
+The R workflow restricts counts to GENCODE protein-coding genes, applies the prespecified expression filter, fits DESeq2, runs Hallmark preranked GSEA and ssGSEA, computes groupwise and continuous pathway statistics with separate FDR families, and evaluates the prespecified total-macrophage aggregate separately from the 22 exploratory LM22 populations. It also writes the ranked Hallmark evidence subset, the prespecified leading-edge gene selection, and the row-standardized patient-level heatmap data used by the transcriptomic figure.
+
+The biological-analysis inputs use the following contracts:
+
+- The count CSV contains gene symbols in its first column and one patient per remaining column;
+  values must be unnormalized nonnegative integers.
+- The GENCODE release 44 annotation is a tab-separated file containing `gene_symbol` and
+  `gene_type`; only `protein_coding` records are retained.
+- The Hallmark input is the 50-set MSigDB release 2025.1 GMT file.
+- The LM22 CSV contains `patient_id` followed by exactly 22 numeric population columns,
+  including `Macrophages M0`, `Macrophages M1`, and `Macrophages M2`. Negative estimates
+  are set to zero and each patient row is renormalized before analysis.
 
 ```bash
 Rscript R/biological_analysis.R \
@@ -279,6 +316,12 @@ Rscript R/biological_analysis.R \
   --seed 2026 \
   --output-dir "$ICVS_GBM_PFS_BIOLOGY_RESULTS"
 ```
+
+The public workflow begins with an unnormalized integer gene-by-patient count matrix and a
+completed LM22 fraction table. Institution-controlled conversion from sequencing reads to
+gene counts and execution under the licensed CIBERSORT signature are upstream governed
+steps; their outputs are validated before downstream analysis rather than being replaced by
+undeclared public substitutes.
 
 ## Research web interface
 

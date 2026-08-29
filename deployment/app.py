@@ -22,7 +22,7 @@ class ICVSRequest(BaseModel):
     vit_score_standardized: FiniteFloat
 
 
-app = FastAPI(title="ICVS-GBM-PFS research API", version="1.0.0")
+app = FastAPI(title="ICVS-GBM-PFS research API", version="1.1.0")
 predictor = ICVSPredictor()
 
 
@@ -60,6 +60,11 @@ def home() -> str:
     .metric span { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
     .metric b { color:var(--navy); font-size:20px; }
     .note { margin-top:20px; padding:13px 14px; background:#eef4f6; border-left:4px solid #69a7b7; color:#3e4c55; font-size:13px; line-height:1.45; }
+    .attribution { margin-top:22px; }
+    .attribution h3 { margin:0 0 10px; color:var(--navy); font-size:16px; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { border-bottom:1px solid var(--line); padding:7px 5px; text-align:right; }
+    th:first-child, td:first-child { text-align:left; }
     .links { margin-top:18px; font-size:13px; }
     a { color:var(--blue); }
     .error { color:#a12a20; background:#fff1ef; border:1px solid #f1c3bd; padding:12px; border-radius:8px; }
@@ -107,7 +112,9 @@ def home() -> str:
         const months = [6,12,18,24,30,36];
         const riskLabel = data.risk_group === 'high' ? 'High risk' : 'Low risk';
         result.className = '';
-        result.innerHTML = `<div class="headline"><div class="risk">${riskLabel}</div><div class="score">Continuous risk score<b>${data.risk_score.toFixed(3)}</b></div></div><div class="grid">${months.map(m => `<div class="metric"><span>${m}-month PFS</span><b>${(100*data[`pfs_probability_${m}m`]).toFixed(1)}%</b></div>`).join('')}</div>`;
+        const labels = { age_years:'Age', mgmt_methylated:'MGMT methylation', non_gross_total_resection:'Non-gross-total resection', vit_score_standardized:'3D-ViT score' };
+        const shapleyRows = Object.entries(data.shapley_values).map(([feature, values]) => `<tr><td>${labels[feature]}</td>${months.map(m => `<td>${(100*values[`${m}m`]).toFixed(1)}</td>`).join('')}</tr>`).join('');
+        result.innerHTML = `<div class="headline"><div class="risk">${riskLabel}</div><div class="score">Continuous risk score<b>${data.risk_score.toFixed(3)}</b></div></div><div class="grid">${months.map(m => `<div class="metric"><span>${m}-month PFS</span><b>${(100*data[`pfs_probability_${m}m`]).toFixed(1)}%</b></div>`).join('')}</div><div class="attribution"><h3>Contribution to progression risk, percentage points</h3><table><thead><tr><th>Predictor</th>${months.map(m => `<th>${m}m</th>`).join('')}</tr></thead><tbody>${shapleyRows}</tbody></table></div>`;
       } catch (error) {
         result.className = 'error';
         result.textContent = error.message;
@@ -133,12 +140,13 @@ def metadata() -> dict[str, object]:
         "features": predictor.feature_order,
         "time_horizons_months": [int(value) for value in predictor.horizons],
         "risk_cutoff": predictor.training_cutoff,
+        "interpretation": "Exact four-predictor time-dependent Shapley values",
         "intended_use": "Research use only",
     }
 
 
 @app.post("/predict")
-def predict(request: ICVSRequest) -> dict[str, float | str]:
+def predict(request: ICVSRequest) -> dict[str, object]:
     try:
         return predictor.predict(request.model_dump())
     except (KeyError, RuntimeError, TypeError, ValueError) as error:

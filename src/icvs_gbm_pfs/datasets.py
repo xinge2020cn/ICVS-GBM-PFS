@@ -27,6 +27,33 @@ class JointMRITransform:
         value = torch.rand((), generator=self.generator).item()
         return lower + (upper - lower) * value
 
+    @staticmethod
+    def _gaussian_smooth(image: torch.Tensor, sigma: float) -> torch.Tensor:
+        if not math.isfinite(sigma) or sigma <= 0:
+            raise ValueError("Gaussian smoothing sigma must be finite and greater than zero.")
+        radius = max(1, int(math.ceil(3.0 * sigma)))
+        coordinates = torch.arange(
+            -radius,
+            radius + 1,
+            dtype=image.dtype,
+            device=image.device,
+        )
+        kernel_1d = torch.exp(-0.5 * (coordinates / sigma).square())
+        kernel_1d = kernel_1d / kernel_1d.sum()
+        kernel_3d = (
+            kernel_1d[:, None, None]
+            * kernel_1d[None, :, None]
+            * kernel_1d[None, None, :]
+        )
+        channels = image.shape[0]
+        weight = kernel_3d.expand(channels, 1, -1, -1, -1).contiguous()
+        return functional.conv3d(
+            image.unsqueeze(0),
+            weight,
+            padding=radius,
+            groups=channels,
+        ).squeeze(0)
+
     def __call__(self, image: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         channels, depth, height, width = image.shape
         if mask is None:
@@ -34,20 +61,28 @@ class JointMRITransform:
         if mask.shape != (1, depth, height, width):
             raise ValueError("The augmentation mask must have shape (1, depth, height, width).")
         mask = mask.to(dtype=image.dtype, device=image.device)
-        angle = math.radians(self._uniform(-10.0, 10.0))
+        angle_x = math.radians(self._uniform(-10.0, 10.0))
+        angle_y = math.radians(self._uniform(-10.0, 10.0))
+        angle_z = math.radians(self._uniform(-10.0, 10.0))
         scale = self._uniform(0.90, 1.10)
         translation_x = self._uniform(-5.0, 5.0) * 2.0 / max(width - 1, 1)
         translation_y = self._uniform(-5.0, 5.0) * 2.0 / max(height - 1, 1)
         translation_z = self._uniform(-1.0, 1.0) * 2.0 / max(depth - 1, 1)
-        cosine = math.cos(angle) / scale
-        sine = math.sin(angle) / scale
-        theta = image.new_tensor(
-            [
-                [cosine, -sine, 0.0, translation_x],
-                [sine, cosine, 0.0, translation_y],
-                [0.0, 0.0, 1.0 / scale, translation_z],
-            ]
-        ).unsqueeze(0)
+        cosine_x, sine_x = math.cos(angle_x), math.sin(angle_x)
+        cosine_y, sine_y = math.cos(angle_y), math.sin(angle_y)
+        cosine_z, sine_z = math.cos(angle_z), math.sin(angle_z)
+        rotation_x = image.new_tensor(
+            [[1.0, 0.0, 0.0], [0.0, cosine_x, -sine_x], [0.0, sine_x, cosine_x]]
+        )
+        rotation_y = image.new_tensor(
+            [[cosine_y, 0.0, sine_y], [0.0, 1.0, 0.0], [-sine_y, 0.0, cosine_y]]
+        )
+        rotation_z = image.new_tensor(
+            [[cosine_z, -sine_z, 0.0], [sine_z, cosine_z, 0.0], [0.0, 0.0, 1.0]]
+        )
+        linear = (rotation_z @ rotation_y @ rotation_x) / scale
+        translation = image.new_tensor([translation_x, translation_y, translation_z])
+        theta = torch.cat([linear, translation[:, None]], dim=1).unsqueeze(0)
         expanded = image.unsqueeze(0)
         grid = functional.affine_grid(theta, expanded.shape, align_corners=False)
         image = functional.grid_sample(
@@ -76,9 +111,7 @@ class JointMRITransform:
         )
         image = image + noise * noise_standard_deviation
         if self._uniform(0.0, 1.0) < 0.30:
-            image = functional.avg_pool3d(
-                image.unsqueeze(0), kernel_size=3, stride=1, padding=1
-            ).squeeze(0)
+            image = self._gaussian_smooth(image, self._uniform(0.50, 1.00))
         image = image * mask
         return image.reshape(channels, depth, height, width).contiguous()
 

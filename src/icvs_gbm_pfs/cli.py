@@ -14,6 +14,7 @@ from .biological import prepare_biological_cohort
 from .clinical import fit_clinical_model
 from .config import StudyConfig, load_config
 from .data import PROCESSED_IMAGE_COLUMNS, RAW_IMAGE_COLUMNS, read_manifest, validate_manifest
+from .descriptive import summarize_cohort_characteristics
 from .evaluation import evaluate_models
 from .explain import exact_time_dependent_shapley, select_explanation_patients
 from .icvs import fit_icvs_model
@@ -27,6 +28,7 @@ from .segmentation import (
     prepare_nnunet_inference,
     run_nnunet_prediction,
     run_nnunet_training,
+    segmentation_bland_altman,
 )
 from .training import run_crossfit_and_refit, select_training_duration
 
@@ -72,6 +74,15 @@ def command_validate(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
+
+
+def command_summarize_cohorts(args: argparse.Namespace) -> None:
+    frame, config = _load_manifest_and_config(args)
+    validate_manifest(frame, config)
+    characteristics, comparisons = summarize_cohort_characteristics(frame, config)
+    output = Path(args.output_dir).resolve()
+    _write_table(characteristics, output / "cohort_characteristics.csv")
+    _write_table(comparisons, output / "cohort_comparisons.csv")
 
 
 def command_preprocess(args: argparse.Namespace) -> None:
@@ -174,6 +185,8 @@ def command_evaluate_segmentation(args: argparse.Namespace) -> None:
     output = Path(args.output_dir).resolve()
     _write_table(patient, output / "segmentation_patient_metrics.csv")
     _write_table(summary, output / "segmentation_summary.csv")
+    agreement = segmentation_bland_altman(patient, config.column("cohort"))
+    _write_table(agreement, output / "segmentation_bland_altman.csv")
 
 
 def command_extract_radiomics(args: argparse.Namespace) -> None:
@@ -375,6 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--manifest", required=True, type=Path)
     validate.add_argument("--paths", choices=("none", "raw", "processed"), default="none")
     validate.set_defaults(function=command_validate)
+
+    summarize = subparsers.add_parser("summarize-cohorts")
+    _common_parser(summarize)
+    summarize.add_argument("--manifest", required=True, type=Path)
+    summarize.add_argument("--output-dir", required=True, type=Path)
+    summarize.set_defaults(function=command_summarize_cohorts)
 
     preprocess = subparsers.add_parser("preprocess")
     _common_parser(preprocess)

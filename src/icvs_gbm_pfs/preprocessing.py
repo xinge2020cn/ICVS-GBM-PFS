@@ -304,8 +304,15 @@ def load_cropped_volume(
     slices = tuple(slice(int(lo), int(hi)) for lo, hi in zip(lower, upper, strict=True))
     volume = np.stack([array[slices] for array in arrays], axis=0)
     mask_crop = mask[slices].astype(np.float32)
+    padding = []
+    for observed, required in reversed(list(zip(mask_crop.shape, target_shape, strict=True))):
+        total = max(0, required - observed)
+        padding.extend([total // 2, total - total // 2])
     tensor = torch.from_numpy(volume).unsqueeze(0)
     mask_tensor = torch.from_numpy(mask_crop).unsqueeze(0).unsqueeze(0)
+    if any(padding):
+        tensor = functional.pad(tensor, padding, mode="constant", value=0.0)
+        mask_tensor = functional.pad(mask_tensor, padding, mode="constant", value=0.0)
     tensor = functional.interpolate(
         tensor,
         size=target_shape,

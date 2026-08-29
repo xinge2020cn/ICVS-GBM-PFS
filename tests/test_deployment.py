@@ -23,9 +23,12 @@ class _SurvivalModel:
         *,
         return_array: bool,
     ) -> np.ndarray:
-        assert features.shape == (1, 4)
+        assert features.ndim == 2 and features.shape[1] == 4
         assert return_array
-        return np.array([[0.90, 0.75, 0.62, 0.50, 0.41, 0.32]])
+        return np.tile(
+            np.array([[0.90, 0.75, 0.62, 0.50, 0.41, 0.32]]),
+            (len(features), 1),
+        )
 
 
 def _bundle() -> dict[str, object]:
@@ -39,6 +42,12 @@ def _bundle() -> dict[str, object]:
         ],
         "training_cutoff": 3.0,
         "horizons_months": np.array([6, 12, 18, 24, 30, 36]),
+        "explanation_background_features": np.array(
+            [
+                [50.0, 0.0, 0.0, -1.0],
+                [70.0, 1.0, 1.0, 1.0],
+            ]
+        ),
     }
 
 
@@ -62,6 +71,16 @@ def test_predictor_validates_and_returns_locked_outputs(
 
     assert result["risk_group"] == "high"
     assert result["pfs_probability_12m"] == pytest.approx(0.75)
+    assert set(result["shapley_values"]) == set(_bundle()["feature_order"])
+    assert set(result["baseline_progression_probability"]) == {
+        "6m",
+        "12m",
+        "18m",
+        "24m",
+        "30m",
+        "36m",
+    }
+    assert result["shapley_additivity_error"] == pytest.approx(0.0, abs=1e-8)
 
 
 def test_predictor_rejects_nonfinite_standardized_vit_score(

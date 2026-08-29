@@ -64,6 +64,29 @@ bootstrap_interval <- function(data_size, statistic, resamples, seed) {
   unname(quantile(values, c(0.025, 0.975), na.rm = TRUE))
 }
 
+running_enrichment_table <- function(ranked_statistics, pathways, selected_pathways) {
+  ordered_genes <- names(ranked_statistics)
+  bind_rows(lapply(selected_pathways, function(pathway_name) {
+    membership <- ordered_genes %in% pathways[[pathway_name]]
+    hit_count <- sum(membership)
+    if (hit_count == 0 || hit_count == length(membership)) {
+      stop(sprintf("Pathway %s cannot produce a running enrichment curve.", pathway_name))
+    }
+    weighted_hits <- abs(ranked_statistics)
+    weighted_hits[!membership] <- 0
+    weighted_hits <- weighted_hits / sum(weighted_hits)
+    increments <- ifelse(membership, weighted_hits, -1 / (length(membership) - hit_count))
+    tibble(
+      pathway = pathway_name,
+      rank = seq_along(ordered_genes),
+      gene_symbol = ordered_genes,
+      wald_statistic = as.numeric(ranked_statistics),
+      pathway_member = membership,
+      running_enrichment_score = cumsum(increments)
+    )
+  }))
+}
+
 pathway_statistics <- function(scores, cohort, resamples, seed) {
   rows <- lapply(seq_len(nrow(scores)), function(index) {
     values <- as.numeric(scores[index, ])
@@ -293,6 +316,7 @@ write_csv(differential, file.path(output_dir, "differential_expression.csv"))
 
 variance_stabilized <- assay(vst(dds, blind = FALSE))
 gene_sets <- read_gmt(hallmark_path)
+if (length(gene_sets) != 50) stop("The Hallmark GMT file must contain exactly 50 gene sets.")
 ranks <- differential$wald_statistic
 names(ranks) <- differential$gene_symbol
 ranks <- sort(ranks[is.finite(ranks)], decreasing = TRUE)
@@ -316,6 +340,94 @@ enrichment <- fgseaMultilevel(
   mutate(leading_edge = vapply(leading_edge, paste, collapse = ";", character(1))) %>%
   arrange(fdr, desc(abs(normalized_enrichment_score)))
 write_csv(enrichment, file.path(output_dir, "hallmark_gsea.csv"))
+hallmark_ranked_extremes <- bind_rows(
+  enrichment %>%
+    arrange(desc(normalized_enrichment_score), pathway) %>%
+    slice_head(n = 10) %>%
+    mutate(rank_group = "highest_normalized_enrichment"),
+  enrichment %>%
+    arrange(normalized_enrichment_score, pathway) %>%
+    slice_head(n = 10) %>%
+    mutate(rank_group = "lowest_normalized_enrichment")
+) %>%
+  distinct(pathway, .keep_all = TRUE) %>%
+  mutate(display_order = row_number())
+write_csv(hallmark_ranked_extremes, file.path(output_dir, "hallmark_ranked_extremes.csv"))
+
+significant_pathways <- enrichment %>% filter(fdr < 0.05) %>% pull(pathway)
+if (length(significant_pathways) == 0) {
+  stop("No Hallmark pathway passed the prespecified GSEA threshold.")
+}
+gsea_curves <- running_enrichment_table(ranks, gene_sets, significant_pathways)
+write_csv(gsea_curves, file.path(output_dir, "hallmark_gsea_curves.csv"))
+
+figure_pathways <- c(
+  "HALLMARK_HYPOXIA",
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+  "HALLMARK_ANGIOGENESIS"
+)
+missing_figure_pathways <- setdiff(figure_pathways, enrichment$pathway)
+if (length(missing_figure_pathways) > 0) {
+  stop(sprintf(
+    "Hallmark results are missing prespecified pathways: %s",
+    paste(missing_figure_pathways, collapse = ", ")
+  ))
+}
+leading_edge_selection <- bind_rows(lapply(figure_pathways, function(pathway_name) {
+  leading_edge_text <- enrichment$leading_edge[enrichment$pathway == pathway_name][[1]]
+  leading_edge_genes <- strsplit(leading_edge_text, ";", fixed = TRUE)[[1]]
+  selected <- differential %>%
+    filter(gene_symbol %in% leading_edge_genes, is.finite(wald_statistic)) %>%
+    arrange(desc(abs(wald_statistic)), gene_symbol) %>%
+    slice_head(n = 8) %>%
+    mutate(pathway = pathway_name, within_pathway_rank = row_number()) %>%
+    select(pathway, within_pathway_rank, everything())
+  if (nrow(selected) != 8) {
+    stop(sprintf("Pathway %s has fewer than eight ranked leading-edge genes.", pathway_name))
+  }
+  selected
+})) %>%
+  mutate(retained_after_deduplication = !duplicated(gene_symbol))
+write_csv(
+  leading_edge_selection,
+  file.path(output_dir, "leading_edge_gene_selection.csv")
+)
+
+retained_genes <- leading_edge_selection %>%
+  filter(retained_after_deduplication) %>%
+  select(pathway, within_pathway_rank, gene_symbol)
+heatmap_matrix <- variance_stabilized[retained_genes$gene_symbol, cohort$patient_id, drop = FALSE]
+row_means <- rowMeans(heatmap_matrix)
+row_standard_deviations <- apply(heatmap_matrix, 1, sd)
+row_standardized <- sweep(heatmap_matrix, 1, row_means, "-")
+nonconstant <- is.finite(row_standard_deviations) & row_standard_deviations > 0
+row_standardized[nonconstant, ] <- sweep(
+  row_standardized[nonconstant, , drop = FALSE],
+  1,
+  row_standard_deviations[nonconstant],
+  "/"
+)
+row_standardized[!nonconstant, ] <- 0
+patient_order <- cohort %>% arrange(vit_group, vit_score) %>% pull(patient_id)
+row_standardized <- row_standardized[, patient_order, drop = FALSE]
+heatmap_data <- expand.grid(
+  gene_symbol = rownames(row_standardized),
+  patient_id = colnames(row_standardized),
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(row_z_score = as.vector(row_standardized)) %>%
+  left_join(retained_genes, by = "gene_symbol") %>%
+  left_join(cohort, by = "patient_id")
+write_csv(heatmap_data, file.path(output_dir, "leading_edge_heatmap_data.csv"))
+write_csv(
+  tibble(
+    pathways = length(figure_pathways),
+    selected_gene_entries = nrow(leading_edge_selection),
+    unique_genes = nrow(retained_genes)
+  ),
+  file.path(output_dir, "leading_edge_selection_summary.csv")
+)
 
 if (exists("ssgseaParam", where = asNamespace("GSVA"), mode = "function")) {
   parameters <- GSVA::ssgseaParam(variance_stabilized, gene_sets, normalize = TRUE)
@@ -344,6 +456,20 @@ pathway_results <- pathway_statistics(ssgsea_scores, cohort, resamples, seed) %>
       directionally_concordant & gsea_fdr < 0.05 & group_fdr < 0.05 & correlation_fdr < 0.05
   )
 write_csv(pathway_results, file.path(output_dir, "hallmark_patient_level_statistics.csv"))
+hallmark_evidence <- bind_rows(
+  enrichment %>%
+    arrange(desc(normalized_enrichment_score), pathway) %>%
+    slice_head(n = 6) %>%
+    mutate(evidence_group = "highest_normalized_enrichment"),
+  enrichment %>%
+    arrange(normalized_enrichment_score, pathway) %>%
+    slice_head(n = 6) %>%
+    mutate(evidence_group = "lowest_normalized_enrichment")
+) %>%
+  distinct(pathway, .keep_all = TRUE) %>%
+  mutate(display_order = row_number()) %>%
+  left_join(pathway_results, by = "pathway")
+write_csv(hallmark_evidence, file.path(output_dir, "hallmark_figure_evidence.csv"))
 write_csv(
   as.data.frame(ssgsea_scores) %>% rownames_to_column("pathway"),
   file.path(output_dir, "hallmark_ssgsea_scores.csv")
@@ -359,6 +485,7 @@ if (anyDuplicated(fractions$patient_id)) stop("LM22 patient identifiers must be 
 if (!all(cohort$patient_id %in% fractions$patient_id)) stop("LM22 fractions are missing cohort patients.")
 fractions <- fractions[match(cohort$patient_id, fractions$patient_id), ]
 cell_columns <- setdiff(names(fractions), "patient_id")
+if (length(cell_columns) != 22) stop("The LM22 fraction table must contain 22 populations.")
 fraction_matrix <- as.matrix(fractions[, cell_columns])
 fraction_matrix <- suppressWarnings(
   matrix(
@@ -394,5 +521,40 @@ primary <- cell_statistics(
 exploratory <- exploratory %>% mutate(prespecified = FALSE)
 write_csv(bind_rows(primary, exploratory), file.path(output_dir, "lm22_statistics.csv"))
 write_csv(fractions, file.path(output_dir, "lm22_normalized_fractions.csv"))
+lm22_profile_matrix <- t(fraction_matrix)
+lm22_profile_means <- rowMeans(lm22_profile_matrix)
+lm22_profile_standard_deviations <- apply(lm22_profile_matrix, 1, sd)
+lm22_profile_z <- sweep(lm22_profile_matrix, 1, lm22_profile_means, "-")
+lm22_nonconstant <- is.finite(lm22_profile_standard_deviations) &
+  lm22_profile_standard_deviations > 0
+lm22_profile_z[lm22_nonconstant, ] <- sweep(
+  lm22_profile_z[lm22_nonconstant, , drop = FALSE],
+  1,
+  lm22_profile_standard_deviations[lm22_nonconstant],
+  "/"
+)
+lm22_profile_z[!lm22_nonconstant, ] <- 0
+lm22_profile_z <- lm22_profile_z[, patient_order, drop = FALSE]
+population_order <- rownames(lm22_profile_z)[
+  hclust(dist(lm22_profile_z), method = "complete")$order
+]
+lm22_heatmap_data <- expand.grid(
+  cell_type = rownames(lm22_profile_z),
+  patient_id = colnames(lm22_profile_z),
+  KEEP.OUT.ATTRS = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    row_z_score = as.vector(lm22_profile_z),
+    population_order = match(cell_type, population_order)
+  ) %>%
+  left_join(cohort, by = "patient_id")
+write_csv(lm22_heatmap_data, file.path(output_dir, "lm22_heatmap_data.csv"))
+write_csv(
+  fractions %>%
+    select(patient_id, all_of(macrophage_columns), total_macrophages) %>%
+    left_join(cohort, by = "patient_id"),
+  file.path(output_dir, "macrophage_figure_data.csv")
+)
 
 writeLines(capture.output(sessionInfo()), file.path(output_dir, "R_session_info.txt"))

@@ -34,11 +34,20 @@ preprocessing:
 
 segmentation:
   dataset_id: 501
+  implementation_version: 2.4.2
   configuration: 3d_fullres
   folds: [0, 1, 2, 3, 4]
   patch_shape_dhw: [32, 192, 192]
   epochs: 1000
+  training_iterations_per_epoch: 250
+  validation_iterations_per_epoch: 50
   batch_size: 2
+  initial_learning_rate: 0.01
+  nesterov_momentum: 0.99
+  weight_decay: 0.00003
+  foreground_oversampling_fraction: 0.33
+  deep_supervision: true
+  automatic_mixed_precision: true
   surface_dice_tolerance_mm: 2.0
 
 deep_survival:

@@ -2,7 +2,7 @@
 
 This directory contains the browser interface and FastAPI endpoint for a fitted ICVS artifact produced by `icvs-gbm-pfs fit-icvs`. No model artifact or patient record is included in the repository.
 
-The API accepts age, MGMT promoter methylation, extent of resection, and the standardized 3D-ViT score. It returns the continuous random-survival-forest risk score, the locked training-median risk group, and predicted PFS probabilities at 6, 12, 18, 24, 30, and 36 months.
+The API accepts age, MGMT promoter methylation, extent of resection, and the standardized 3D-ViT score. It returns the continuous random-survival-forest risk score, the locked training-median risk group, predicted PFS probabilities, and exact four-predictor time-dependent Shapley values at 6, 12, 18, 24, 30, and 36 months. The governed model artifact contains the complete training-cohort feature background required for coalition expectations; the repository does not include that artifact.
 
 Set `ICVS_MODEL_ARTIFACT` to the governed `icvs_model.joblib` file and start the service:
 

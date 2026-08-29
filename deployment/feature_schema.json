@@ -39,6 +39,9 @@
     "pfs_probability_18m",
     "pfs_probability_24m",
     "pfs_probability_30m",
-    "pfs_probability_36m"
+    "pfs_probability_36m",
+    "baseline_progression_probability",
+    "shapley_values",
+    "shapley_additivity_error"
   ]
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,13 @@ class ICVSPredictor:
         if not path.is_file():
             raise FileNotFoundError(f"ICVS model artifact not found: {path}")
         bundle = joblib.load(path)
-        required = {"model", "feature_order", "training_cutoff", "horizons_months"}
+        required = {
+            "model",
+            "feature_order",
+            "training_cutoff",
+            "horizons_months",
+            "explanation_background_features",
+        }
         missing = sorted(required.difference(bundle))
         if missing:
             raise ValueError(f"ICVS model artifact is missing keys: {', '.join(missing)}")
@@ -45,6 +53,16 @@ class ICVSPredictor:
             or np.any(np.diff(self.horizons) <= 0)
         ):
             raise ValueError("ICVS model artifact contains invalid prediction horizons.")
+        self.explanation_background = np.asarray(
+            bundle["explanation_background_features"], dtype=float
+        )
+        if (
+            self.explanation_background.ndim != 2
+            or self.explanation_background.shape[0] == 0
+            or self.explanation_background.shape[1] != len(self.feature_order)
+            or not np.isfinite(self.explanation_background).all()
+        ):
+            raise ValueError("ICVS model artifact contains an invalid explanation background.")
 
     @staticmethod
     def _vectorize(payload: dict[str, Any]) -> np.ndarray:
@@ -74,7 +92,52 @@ class ICVSPredictor:
             dtype=float,
         )
 
-    def predict(self, payload: dict[str, Any]) -> dict[str, float | str]:
+    def _progression_probabilities(self, features: np.ndarray) -> np.ndarray:
+        survival = self.model.predict_survival_function(features, return_array=True)
+        indices = np.searchsorted(self.model.unique_times_, self.horizons, side="right") - 1
+        progression = np.zeros((len(features), len(self.horizons)), dtype=float)
+        available = indices >= 0
+        progression[:, available] = 1.0 - survival[:, indices[available]]
+        return progression
+
+    def _explain(self, features: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+        feature_count = len(self.feature_order)
+        coalition_values: dict[int, np.ndarray] = {}
+        for coalition_bits in range(1 << feature_count):
+            combined = self.explanation_background.copy()
+            for feature_index in range(feature_count):
+                if coalition_bits & (1 << feature_index):
+                    combined[:, feature_index] = features[0, feature_index]
+            coalition_values[coalition_bits] = self._progression_probabilities(combined).mean(
+                axis=0
+            )
+        shapley = np.zeros((feature_count, len(self.horizons)), dtype=float)
+        for feature_index in range(feature_count):
+            other_features = [
+                index for index in range(feature_count) if index != feature_index
+            ]
+            for subset_size in range(feature_count):
+                weight = (
+                    math.factorial(subset_size)
+                    * math.factorial(feature_count - subset_size - 1)
+                    / math.factorial(feature_count)
+                )
+                for subset in itertools.combinations(other_features, subset_size):
+                    bits = sum(1 << index for index in subset)
+                    shapley[feature_index] += weight * (
+                        coalition_values[bits | (1 << feature_index)]
+                        - coalition_values[bits]
+                    )
+        baseline = coalition_values[0]
+        prediction = coalition_values[(1 << feature_count) - 1]
+        additivity_error = float(np.max(np.abs(baseline + shapley.sum(axis=0) - prediction)))
+        if additivity_error > 1e-8:
+            raise RuntimeError(
+                f"ICVS explanation additivity check failed with error {additivity_error:.3e}."
+            )
+        return shapley, baseline, additivity_error
+
+    def predict(self, payload: dict[str, Any]) -> dict[str, object]:
         """Return locked risk and PFS probabilities for one validated request."""
 
         features = self._vectorize(payload)
@@ -88,10 +151,23 @@ class ICVSPredictor:
             raise RuntimeError("ICVS inference produced nonfinite values.")
         if np.any((probabilities < 0.0) | (probabilities > 1.0)):
             raise RuntimeError("ICVS inference produced invalid survival probabilities.")
-        output: dict[str, float | str] = {
+        output: dict[str, object] = {
             "risk_score": risk_score,
             "risk_group": "high" if risk_score > self.training_cutoff else "low",
         }
         for month, probability in zip(self.horizons, probabilities, strict=True):
             output[f"pfs_probability_{int(month)}m"] = float(probability)
+        shapley, baseline, additivity_error = self._explain(features)
+        output["baseline_progression_probability"] = {
+            f"{int(month)}m": float(value)
+            for month, value in zip(self.horizons, baseline, strict=True)
+        }
+        output["shapley_values"] = {
+            feature: {
+                f"{int(month)}m": float(value)
+                for month, value in zip(self.horizons, shapley[feature_index], strict=True)
+            }
+            for feature_index, feature in enumerate(self.feature_order)
+        }
+        output["shapley_additivity_error"] = additivity_error
         return output

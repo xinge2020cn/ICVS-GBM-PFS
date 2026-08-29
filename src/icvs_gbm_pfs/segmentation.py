@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import inspect
 import json
 import os
@@ -391,6 +392,18 @@ def _validate_nnunet_training_duration(config: StudyConfig, trainer: str) -> Non
         raise ValueError("The nnU-Net epoch count must be greater than zero.")
     if trainer != "nnUNetTrainer":
         return
+    expected_version = str(config.section("segmentation")["implementation_version"])
+    try:
+        observed_version = importlib.metadata.version("nnunetv2")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError(
+            "nnU-Net is unavailable. Install the segmentation optional dependency."
+        ) from error
+    if observed_version != expected_version:
+        raise RuntimeError(
+            f"Installed nnU-Net version is {observed_version}; the locked study version is "
+            f"{expected_version}."
+        )
     try:
         from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
     except ImportError as error:
@@ -632,6 +645,54 @@ def evaluate_segmentation_manifest(
                 }
             )
     return patient_metrics, pd.DataFrame(summary_rows)
+
+
+def segmentation_bland_altman(
+    patient_metrics: pd.DataFrame,
+    cohort_column: str,
+) -> pd.DataFrame:
+    """Summarize absolute and relative volume agreement by cohort."""
+
+    required = {
+        cohort_column,
+        "reference_volume_ml",
+        "prediction_volume_ml",
+        "signed_relative_volume_error",
+    }
+    missing = sorted(required.difference(patient_metrics.columns))
+    if missing:
+        raise ValueError(f"Patient metrics are missing volume columns: {', '.join(missing)}")
+    if patient_metrics.empty:
+        raise ValueError("Volume agreement requires at least one patient.")
+    rows = []
+    for cohort, group in patient_metrics.groupby(cohort_column, sort=False):
+        absolute_difference = (
+            group["prediction_volume_ml"] - group["reference_volume_ml"]
+        ).to_numpy(dtype=float)
+        relative_difference = 100.0 * group["signed_relative_volume_error"].to_numpy(dtype=float)
+        for scale, unit, differences in (
+            ("absolute_volume", "mL", absolute_difference),
+            ("relative_volume", "percent", relative_difference),
+        ):
+            if not np.isfinite(differences).all():
+                raise ValueError("Volume-agreement differences must be finite.")
+            bias = float(np.mean(differences))
+            standard_deviation = (
+                float(np.std(differences, ddof=1)) if len(differences) > 1 else float("nan")
+            )
+            rows.append(
+                {
+                    "cohort": cohort,
+                    "scale": scale,
+                    "unit": unit,
+                    "n": len(differences),
+                    "bias": bias,
+                    "standard_deviation": standard_deviation,
+                    "lower_limit_of_agreement": bias - 1.96 * standard_deviation,
+                    "upper_limit_of_agreement": bias + 1.96 * standard_deviation,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def safe_case_id(value: object) -> str:

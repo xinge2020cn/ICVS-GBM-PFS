@@ -15,6 +15,7 @@ from sksurv.metrics import (
     concordance_index_censored,
     cumulative_dynamic_auc,
 )
+from sksurv.nonparametric import CensoringDistributionEstimator
 
 from .config import StudyConfig
 from .survival import structured_survival
@@ -106,18 +107,109 @@ def _metric_values(
     return result
 
 
+def _time_dependent_roc_table(
+    training_outcome: np.ndarray,
+    test_outcome: np.ndarray,
+    risk_score: np.ndarray,
+    horizons: np.ndarray,
+) -> pd.DataFrame:
+    """Calculate cumulative/dynamic ROC coordinates with training-based IPCW."""
+
+    risk = np.asarray(risk_score, dtype=float)
+    if risk.ndim != 1 or len(risk) != len(test_outcome) or not np.isfinite(risk).all():
+        raise ValueError("ROC risk scores must be finite and aligned with the test outcomes.")
+    censoring = CensoringDistributionEstimator().fit(training_outcome)
+    inverse_censoring_weights = censoring.predict_ipcw(test_outcome)
+    rows = []
+    unique_risk = np.sort(np.unique(risk))[::-1]
+    thresholds = np.concatenate(
+        (
+            [np.nextafter(unique_risk[0], np.inf)],
+            unique_risk,
+            [np.nextafter(unique_risk[-1], -np.inf)],
+        )
+    )
+    for horizon in horizons:
+        cases = test_outcome["event"] & (test_outcome["time"] <= horizon)
+        controls = test_outcome["time"] > horizon
+        case_weight_total = float(inverse_censoring_weights[cases].sum())
+        if case_weight_total <= 0 or not controls.any():
+            raise ValueError(f"ROC analysis is not estimable at {horizon:g} months.")
+        positive = risk[:, None] >= thresholds[None, :]
+        sensitivity = (
+            inverse_censoring_weights[cases, None] * positive[cases]
+        ).sum(axis=0) / case_weight_total
+        false_positive_rate = positive[controls].mean(axis=0)
+        rows.extend(
+            {
+                "horizon_months": float(horizon),
+                "threshold": float(threshold),
+                "false_positive_rate": float(false_positive),
+                "sensitivity": float(true_positive),
+                "specificity": float(1.0 - false_positive),
+            }
+            for threshold, false_positive, true_positive in zip(
+                thresholds, false_positive_rate, sensitivity, strict=True
+            )
+        )
+    return pd.DataFrame(rows)
+
+
+def _kaplan_meier_curve_table(
+    frame: pd.DataFrame,
+    *,
+    score_column: str,
+    cutoff: float,
+    time_column: str,
+    event_column: str,
+) -> pd.DataFrame:
+    """Return survival, pointwise intervals, and numbers at risk for locked risk groups."""
+
+    values = frame[[time_column, event_column, score_column]].copy()
+    values["risk_group"] = np.where(values[score_column] > cutoff, "high", "low")
+    rows = []
+    for risk_group, group in values.groupby("risk_group", sort=True):
+        estimator = KaplanMeierFitter(alpha=0.05).fit(
+            group[time_column],
+            event_observed=group[event_column],
+            label=str(risk_group),
+        )
+        curve = estimator.survival_function_
+        interval = estimator.confidence_interval_survival_function_
+        event_table = estimator.event_table
+        for index, time in enumerate(curve.index.to_numpy(dtype=float)):
+            rows.append(
+                {
+                    "risk_group": str(risk_group),
+                    "time_months": float(time),
+                    "survival_probability": float(curve.iloc[index, 0]),
+                    "ci_low": float(interval.iloc[index, 0]),
+                    "ci_high": float(interval.iloc[index, 1]),
+                    "at_risk": int(event_table.iloc[index]["at_risk"]),
+                    "events": int(event_table.iloc[index]["observed"]),
+                    "censored": int(event_table.iloc[index]["censored"]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _calibration_table(
     frame: pd.DataFrame,
     *,
-    probability_column: str,
+    progression_probability_column: str,
     time_column: str,
     event_column: str,
     horizon: float,
     groups: int,
 ) -> pd.DataFrame:
-    calibration = frame[[probability_column, time_column, event_column]].dropna().copy()
+    calibration = frame[
+        [progression_probability_column, time_column, event_column]
+    ].dropna().copy()
     calibration["group"] = pd.qcut(
-        calibration[probability_column], q=groups, labels=False, duplicates="drop"
+        calibration[progression_probability_column],
+        q=groups,
+        labels=False,
+        duplicates="drop",
     )
     rows = []
     for group, values in calibration.groupby("group", sort=True):
@@ -134,7 +226,9 @@ def _calibration_table(
             {
                 "group": int(group) + 1,
                 "n": len(values),
-                "mean_predicted_progression": float(values[probability_column].mean()),
+                "mean_predicted_progression": float(
+                    values[progression_probability_column].mean()
+                ),
                 "observed_progression": 1.0 - survival,
                 "observed_progression_ci_low": 1.0 - survival_high,
                 "observed_progression_ci_high": 1.0 - survival_low,
@@ -287,6 +381,20 @@ def _bootstrap_pairwise(
     second_risk = second["risk_score"].to_numpy(float)
     rng = np.random.default_rng(seed)
     differences = {"c_index": [], "integrated_auc": []}
+    first_observed = _metric_values(
+        training_outcome,
+        outcome,
+        first_risk,
+        first[[f"pfs_{int(horizon)}m" for horizon in horizons]].to_numpy(float),
+        horizons,
+    )
+    second_observed = _metric_values(
+        training_outcome,
+        outcome,
+        second_risk,
+        second[[f"pfs_{int(horizon)}m" for horizon in horizons]].to_numpy(float),
+        horizons,
+    )
     for _ in range(resamples):
         selected = rng.integers(0, len(first), size=len(first))
         sampled_outcome = outcome[selected]
@@ -320,7 +428,7 @@ def _bootstrap_pairwise(
                 "model_1": first_model,
                 "model_2": second_model,
                 "metric": metric,
-                "difference": float(np.mean(array)),
+                "difference": float(first_observed[metric] - second_observed[metric]),
                 "ci_low": float(np.percentile(array, 2.5)),
                 "ci_high": float(np.percentile(array, 97.5)),
                 "p_value": float(p_value),
@@ -398,6 +506,8 @@ def evaluate_models(
     risk_rows = []
     cox_rows = []
     pairwise_rows = []
+    roc_rows = []
+    kaplan_meier_rows = []
     settings = config.section("evaluation")
     adjustment_columns = [
         config.column("age"),
@@ -446,6 +556,15 @@ def evaluate_models(
                     **intervals,
                 }
             )
+            roc = _time_dependent_roc_table(
+                training_outcome,
+                outcome,
+                model_frame["risk_score"].to_numpy(float),
+                horizons,
+            )
+            roc.insert(0, "model", model_name)
+            roc.insert(0, "cohort", cohort_name)
+            roc_rows.extend(roc.to_dict(orient="records"))
             calibration_horizon = float(settings["calibration_horizon_months"])
             probability_column = f"pfs_{int(calibration_horizon)}m"
             calibration_input = model_frame.copy()
@@ -454,7 +573,7 @@ def evaluate_models(
             )
             calibration = _calibration_table(
                 calibration_input,
-                probability_column="progression_probability",
+                progression_probability_column="progression_probability",
                 time_column=time_col,
                 event_column=event_col,
                 horizon=calibration_horizon,
@@ -474,6 +593,16 @@ def evaluate_models(
             risk_rows.append(
                 {"cohort": cohort_name, "model": model_name, **risk_summary}
             )
+            kaplan_meier = _kaplan_meier_curve_table(
+                model_frame,
+                score_column="risk_score",
+                cutoff=float(cutoffs[model_name]),
+                time_column=time_col,
+                event_column=event_col,
+            )
+            kaplan_meier.insert(0, "model", model_name)
+            kaplan_meier.insert(0, "cohort", cohort_name)
+            kaplan_meier_rows.extend(kaplan_meier.to_dict(orient="records"))
             for row in coefficient_rows:
                 cox_rows.append({"cohort": cohort_name, "model": model_name, **row})
         models = sorted(cohort["model"].unique())
@@ -512,6 +641,8 @@ def evaluate_models(
         "risk_stratification": risk_table,
         "cox_regression": pd.DataFrame(cox_rows),
         "pairwise_comparisons": pairwise_table,
+        "time_dependent_roc": pd.DataFrame(roc_rows),
+        "kaplan_meier_curves": pd.DataFrame(kaplan_meier_rows),
     }
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
