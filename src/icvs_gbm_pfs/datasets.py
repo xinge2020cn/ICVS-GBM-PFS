@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from pathlib import Path
@@ -25,8 +27,13 @@ class JointMRITransform:
         value = torch.rand((), generator=self.generator).item()
         return lower + (upper - lower) * value
 
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
+    def __call__(self, image: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         channels, depth, height, width = image.shape
+        if mask is None:
+            mask = image.abs().sum(dim=0, keepdim=True).gt(0).to(image.dtype)
+        if mask.shape != (1, depth, height, width):
+            raise ValueError("The augmentation mask must have shape (1, depth, height, width).")
+        mask = mask.to(dtype=image.dtype, device=image.device)
         angle = math.radians(self._uniform(-10.0, 10.0))
         scale = self._uniform(0.90, 1.10)
         translation_x = self._uniform(-5.0, 5.0) * 2.0 / max(width - 1, 1)
@@ -50,6 +57,13 @@ class JointMRITransform:
             padding_mode="zeros",
             align_corners=False,
         ).squeeze(0)
+        mask = functional.grid_sample(
+            mask.unsqueeze(0),
+            grid,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=False,
+        ).squeeze(0)
         intensity_scale = self._uniform(0.90, 1.10)
         intensity_shift = self._uniform(-0.10, 0.10)
         image = image * intensity_scale + intensity_shift
@@ -65,6 +79,7 @@ class JointMRITransform:
             image = functional.avg_pool3d(
                 image.unsqueeze(0), kernel_size=3, stride=1, padding=1
             ).squeeze(0)
+        image = image * mask
         return image.reshape(channels, depth, height, width).contiguous()
 
 
@@ -92,24 +107,65 @@ class SurvivalVolumeDataset(Dataset[dict[str, object]]):
     def __len__(self) -> int:
         return len(self.frame)
 
-    def _load_image(self, index: int) -> torch.Tensor:
-        patient_id = str(self.frame.iloc[index][self.config.column("patient_id")])
+    def _cache_path(self, index: int) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        row = self.frame.iloc[index]
+        patient_id = str(row[self.config.column("patient_id")])
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", patient_id)
-        cache_path = self.cache_dir / f"{safe_id}.pt" if self.cache_dir is not None else None
+        sources = []
+        for column in (
+            "preprocessed_t1_path",
+            "preprocessed_t2_path",
+            "preprocessed_flair_path",
+            "preprocessed_ce_t1_path",
+            "voi_path",
+        ):
+            path = Path(str(row[column])).resolve()
+            stat = path.stat()
+            sources.append(
+                {
+                    "path": str(path),
+                    "size": stat.st_size,
+                    "modified_ns": stat.st_mtime_ns,
+                }
+            )
+        payload = json.dumps(
+            {"patient_id": patient_id, "target_shape_dhw": self.target_shape, "sources": sources},
+            sort_keys=True,
+        ).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()[:16]
+        return self.cache_dir / f"{safe_id}-{digest}.pt"
+
+    def _load_image(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_path = self._cache_path(index)
         if cache_path is not None and cache_path.is_file():
-            return torch.load(cache_path, map_location="cpu", weights_only=True)
-        image, _ = load_cropped_volume(self.frame.iloc[index], self.target_shape)
+            cached = torch.load(cache_path, map_location="cpu", weights_only=True)
+            if not isinstance(cached, dict) or set(cached) != {"image", "mask"}:
+                raise ValueError(f"Invalid volume cache entry: {cache_path}")
+            image = cached["image"]
+            mask = cached["mask"]
+            expected_image_shape = (4, *self.target_shape)
+            expected_mask_shape = (1, *self.target_shape)
+            if image.shape != expected_image_shape or mask.shape != expected_mask_shape:
+                raise ValueError(
+                    f"Cached volume geometry does not match the configuration: {cache_path}"
+                )
+            if not torch.isfinite(image).all() or not torch.isfinite(mask).all():
+                raise ValueError(f"Cached volume contains nonfinite values: {cache_path}")
+            return image, mask
+        image, mask = load_cropped_volume(self.frame.iloc[index], self.target_shape)
         if cache_path is not None:
             temporary = cache_path.with_suffix(".partial")
-            torch.save(image, temporary)
+            torch.save({"image": image, "mask": mask}, temporary)
             temporary.replace(cache_path)
-        return image
+        return image, mask
 
     def __getitem__(self, index: int) -> dict[str, object]:
         row = self.frame.iloc[index]
-        image = self._load_image(index)
+        image, mask = self._load_image(index)
         if self.transform is not None:
-            image = self.transform(image)
+            image = self.transform(image, mask)
         return {
             "image": image,
             "time": torch.tensor(float(row[self.config.column("pfs_time")]), dtype=torch.float32),

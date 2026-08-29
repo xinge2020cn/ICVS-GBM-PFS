@@ -89,15 +89,19 @@ def fit_icvs_model(
     missing = [column for column in required_scores if column not in vit_scores]
     if missing:
         raise ValueError(f"ViT score table is missing columns: {', '.join(missing)}")
+    if vit_scores[patient_col].duplicated().any():
+        raise ValueError("ViT score table contains duplicate patient identifiers.")
+    if set(manifest[patient_col].astype(str)) != set(vit_scores[patient_col].astype(str)):
+        raise ValueError("ViT scores must contain exactly one row for every patient.")
     frame = manifest.merge(
         vit_scores[required_scores], on=patient_col, how="left", validate="one_to_one"
     )
-    if frame["vit_score_final"].isna().any():
-        raise ValueError("Final ViT scores are missing for one or more patients.")
+    if not np.isfinite(frame["vit_score_final"].to_numpy(float)).all():
+        raise ValueError("Final ViT scores must be finite for every patient.")
     training_mask = frame[cohort_col].eq(config.cohort("training")).to_numpy()
     training = frame.loc[training_mask].reset_index(drop=True)
-    if training["vit_score_oof"].isna().any():
-        raise ValueError("Every training patient must have one out-of-fold ViT score.")
+    if not np.isfinite(training["vit_score_oof"].to_numpy(float)).all():
+        raise ValueError("Every training patient must have one finite out-of-fold ViT score.")
     oof_scaler = StandardScaler().fit(training[["vit_score_oof"]])
     oof_standardized = oof_scaler.transform(training[["vit_score_oof"]]).reshape(-1)
     final_scaler = StandardScaler().fit(training[["vit_score_final"]])
@@ -118,10 +122,22 @@ def fit_icvs_model(
     )
     model.fit(training_features, outcome)
     risk_score = model.predict(all_features)
+    if not np.isfinite(risk_score).all() or not np.isfinite(model.oob_prediction_).all():
+        raise RuntimeError("ICVS fitting produced nonfinite risk predictions.")
     risk_score[training_mask] = model.oob_prediction_
     horizons = np.asarray(settings["horizons_months"], dtype=float)
+    if (
+        horizons.ndim != 1
+        or horizons.size == 0
+        or not np.isfinite(horizons).all()
+        or np.any(horizons <= 0)
+        or np.any(np.diff(horizons) <= 0)
+    ):
+        raise ValueError("ICVS horizons must be strictly increasing positive values.")
     survival = _survival_at_horizons(model, all_features, horizons)
     survival[training_mask] = _oob_survival_at_horizons(model, training_features, horizons)
+    if not np.isfinite(survival).all() or np.any((survival < 0.0) | (survival > 1.0)):
+        raise RuntimeError("ICVS fitting produced invalid survival probabilities.")
     cutoff = float(np.median(model.oob_prediction_))
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)

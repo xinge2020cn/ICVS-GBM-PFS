@@ -18,6 +18,14 @@ from .survival import structured_survival
 from .training import survival_strata
 
 
+def _radiomic_feature_name(modality: str, name: str) -> str:
+    """Name modality-independent shape features once and other features by sequence."""
+
+    if name.startswith("original_shape_"):
+        return f"shape__{name}"
+    return f"{modality}__{name}"
+
+
 def extract_radiomics_features(
     frame: pd.DataFrame,
     config: StudyConfig,
@@ -56,7 +64,12 @@ def extract_radiomics_features(
                 if name.startswith("diagnostics_"):
                     continue
                 scalar = float(np.asarray(value).reshape(-1)[0])
-                values[f"{modality}__{name}"] = scalar
+                output_name = _radiomic_feature_name(modality, name)
+                if output_name in values and not np.isclose(float(values[output_name]), scalar):
+                    raise ValueError(
+                        f"Modality-independent shape feature changed across sequences: {name}"
+                    )
+                values[output_name] = scalar
         rows.append(values)
     result = pd.DataFrame(rows)
     feature_columns = [column for column in result if column != patient_col]
@@ -108,16 +121,22 @@ def _negative_partial_log_likelihood(
     time = np.asarray(time, dtype=float)
     event = np.asarray(event, dtype=bool)
     score = np.asarray(score, dtype=float)
+    if not (time.shape == event.shape == score.shape) or time.ndim != 1:
+        raise ValueError("Time, event, and score arrays must be aligned and one-dimensional.")
+    if not np.isfinite(time).all() or not np.isfinite(score).all() or np.any(time <= 0):
+        raise ValueError("Survival times and scores must be finite, with positive times.")
     total = 0.0
     events = 0
     for event_time in np.unique(time[event]):
-        deaths = event & np.isclose(time, event_time)
+        deaths = event & (time == event_time)
         at_risk = time >= event_time
         deaths_count = int(deaths.sum())
         maximum = float(score[at_risk].max())
         log_denominator = maximum + np.log(np.exp(score[at_risk] - maximum).sum())
         total -= float(score[deaths].sum()) - deaths_count * log_denominator
         events += deaths_count
+    if events == 0:
+        raise ValueError("A validation fold must contain at least one observed event.")
     return total / events
 
 
@@ -135,8 +154,14 @@ def fit_radiomics_model(
     event_col = config.column("pfs_event")
     if features[patient_col].duplicated().any():
         raise ValueError("Radiomics features contain duplicate patient identifiers.")
+    manifest_ids = set(manifest[patient_col].astype(str))
+    feature_ids = set(features[patient_col].astype(str))
+    if manifest_ids != feature_ids:
+        raise ValueError("Radiomics features must contain exactly one row for every patient.")
     merged = manifest.merge(features, on=patient_col, how="left", validate="one_to_one")
     feature_columns = [column for column in features if column != patient_col]
+    if not feature_columns:
+        raise ValueError("Radiomics feature table contains no feature columns.")
     if merged[feature_columns].isna().any().any():
         raise ValueError("Radiomics features are missing for one or more manifest patients.")
     training = merged.loc[merged[cohort_col].eq(config.cohort("training"))].reset_index(drop=True)
@@ -163,6 +188,10 @@ def fit_radiomics_model(
     ).fit(full_x, training_y)
     alphas = path_model.alphas_
     folds = int(config.section("radiomics")["cross_validation_folds"])
+    if folds < 2 or len(training) < folds:
+        raise ValueError(
+            "Radiomics cross-validation requires at least two folds and one patient per fold."
+        )
     splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=config.seed)
     fold_losses = np.full((folds, len(alphas)), np.nan, dtype=float)
     strata = survival_strata(training, config, minimum_count=folds)
@@ -214,7 +243,9 @@ def fit_radiomics_model(
     path_coefficients = selected_path.coef_.reshape(-1)
     nonzero = np.flatnonzero(np.abs(path_coefficients) > 1e-10)
     if nonzero.size == 0:
-        nonzero = np.array([int(np.argmax(np.abs(path_coefficients)))])
+        raise RuntimeError(
+            "The selected LASSO penalty retained no radiomic features; no feature was substituted."
+        )
     selected_features = [candidates[index] for index in nonzero]
     final_scaler = StandardScaler().fit(training[selected_features])
     final_x = final_scaler.transform(training[selected_features])

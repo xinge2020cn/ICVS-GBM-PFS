@@ -31,6 +31,21 @@ class VisionTransformer3DSurvival(nn.Module):
         patch_shape = tuple(int(value) for value in patch_shape_dhw)
         if len(input_shape) != 3 or len(patch_shape) != 3:
             raise ValueError("Input and patch shapes must each contain three dimensions.")
+        if any(value <= 0 for value in (*input_shape, *patch_shape)):
+            raise ValueError("Input and patch dimensions must be greater than zero.")
+        if input_channels <= 0 or embedding_dim <= 0 or depth <= 0 or heads <= 0 or head_dim <= 0:
+            raise ValueError("Model dimensions, channels, depth, and heads must be positive.")
+        if embedding_dim % heads != 0:
+            raise ValueError("The embedding dimension must be divisible by the attention heads.")
+        if mlp_ratio <= 0:
+            raise ValueError("The transformer MLP ratio must be greater than zero.")
+        for name, value in (
+            ("attention dropout", attention_dropout),
+            ("projection dropout", projection_dropout),
+            ("head dropout", head_dropout),
+        ):
+            if not 0.0 <= value < 1.0:
+                raise ValueError(f"The {name} must lie in the interval [0, 1).")
         if any(size % patch != 0 for size, patch in zip(input_shape, patch_shape, strict=True)):
             raise ValueError("Every input dimension must be divisible by its patch dimension.")
         token_grid = tuple(
@@ -38,6 +53,7 @@ class VisionTransformer3DSurvival(nn.Module):
         )
         token_count = token_grid[0] * token_grid[1] * token_grid[2]
         self.input_shape_dhw = input_shape
+        self.input_channels = input_channels
         self.patch_embedding = nn.Conv3d(
             input_channels,
             embedding_dim,
@@ -82,6 +98,10 @@ class VisionTransformer3DSurvival(nn.Module):
                 nn.init.zeros_(module.bias)
 
     def forward_features(self, image: torch.Tensor) -> torch.Tensor:
+        if image.ndim != 5 or image.shape[1] != self.input_channels:
+            raise ValueError(
+                f"Expected a five-dimensional tensor with {self.input_channels} channels."
+            )
         if tuple(image.shape[2:]) != self.input_shape_dhw:
             raise ValueError(
                 f"Expected input shape {self.input_shape_dhw}, received {tuple(image.shape[2:])}."
@@ -157,6 +177,13 @@ class ResNet3DSurvival(nn.Module):
         super().__init__()
         if len(stage_blocks) != 4 or len(stage_channels) != 4:
             raise ValueError("The 3D ResNet requires four residual stages.")
+        if input_channels <= 0 or head_dim <= 0:
+            raise ValueError("Input channels and head dimension must be greater than zero.")
+        if any(int(value) <= 0 for value in (*stage_blocks, *stage_channels)):
+            raise ValueError("Residual block counts and channel widths must be greater than zero.")
+        if not 0.0 <= head_dropout < 1.0:
+            raise ValueError("The head dropout must lie in the interval [0, 1).")
+        self.input_channels = input_channels
         self.stem = nn.Sequential(
             nn.Conv3d(
                 input_channels,
@@ -204,6 +231,10 @@ class ResNet3DSurvival(nn.Module):
                 nn.init.zeros_(module.bias)
 
     def forward_features(self, image: torch.Tensor) -> torch.Tensor:
+        if image.ndim != 5 or image.shape[1] != self.input_channels:
+            raise ValueError(
+                f"Expected a five-dimensional tensor with {self.input_channels} channels."
+            )
         value = self.stages(self.stem(image))
         return self.pool(value).flatten(1)
 

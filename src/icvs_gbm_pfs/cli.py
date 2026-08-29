@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .biological import prepare_biological_cohort
 from .clinical import fit_clinical_model
 from .config import StudyConfig, load_config
 from .data import PROCESSED_IMAGE_COLUMNS, RAW_IMAGE_COLUMNS, read_manifest, validate_manifest
@@ -33,8 +34,12 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
 
 def _load_manifest_and_config(args: argparse.Namespace) -> tuple[pd.DataFrame, StudyConfig]:
     config = load_config(args.config)
-    frame = read_manifest(args.manifest)
+    frame = read_manifest(args.manifest, patient_id_column=config.column("patient_id"))
     return frame, config
+
+
+def _read_patient_table(path: str | Path, patient_column: str) -> pd.DataFrame:
+    return pd.read_csv(path, dtype={patient_column: "string"})
 
 
 def _write_table(table: pd.DataFrame, path: str | Path) -> None:
@@ -143,7 +148,7 @@ def command_extract_radiomics(args: argparse.Namespace) -> None:
 def command_train_radiomics(args: argparse.Namespace) -> None:
     frame, config = _load_manifest_and_config(args)
     validate_manifest(frame, config)
-    features = pd.read_csv(args.features)
+    features = _read_patient_table(args.features, config.column("patient_id"))
     fit_radiomics_model(frame, features, config, args.output_dir)
 
 
@@ -172,8 +177,11 @@ def command_select_duration(args: argparse.Namespace) -> None:
     output.write_text(
         json.dumps(
             {
+                "model": args.model,
                 "best_epoch": result.best_epoch,
                 "epochs_completed": result.epochs_completed,
+                "development_patient_ids": list(result.development_patient_ids),
+                "tuning_patient_ids": list(result.validation_patient_ids),
                 "history": result.history,
             },
             indent=2,
@@ -186,6 +194,14 @@ def command_select_duration(args: argparse.Namespace) -> None:
 def command_train_deep(args: argparse.Namespace) -> None:
     frame, config = _load_manifest_and_config(args)
     validate_manifest(frame, config, require_paths=PROCESSED_IMAGE_COLUMNS)
+    epochs = args.epochs
+    if args.duration_file is not None:
+        duration = json.loads(Path(args.duration_file).read_text(encoding="utf-8"))
+        if duration.get("model") != args.model:
+            raise ValueError("The duration file was generated for a different model.")
+        epochs = duration.get("best_epoch")
+        if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
+            raise ValueError("The duration file does not contain a valid positive best epoch.")
     run_crossfit_and_refit(
         frame,
         config,
@@ -193,14 +209,14 @@ def command_train_deep(args: argparse.Namespace) -> None:
         output_dir=args.output_dir,
         cache_dir=args.cache_dir,
         device_name=args.device,
-        epochs_override=args.epochs,
+        epochs_override=epochs,
     )
 
 
 def command_fit_icvs(args: argparse.Namespace) -> None:
     frame, config = _load_manifest_and_config(args)
     validate_manifest(frame, config)
-    scores = pd.read_csv(args.vit_scores)
+    scores = _read_patient_table(args.vit_scores, config.column("patient_id"))
     fit_icvs_model(frame, scores, config, args.output_dir)
 
 
@@ -213,8 +229,8 @@ def _standard_prediction_table(
     prefix: str,
     deep: bool,
 ) -> pd.DataFrame:
-    table = pd.read_csv(path)
     patient_col = config.column("patient_id")
+    table = _read_patient_table(path, patient_col)
     cohort_col = config.column("cohort")
     horizons = config.section("icvs")["horizons_months"]
     table = manifest[[patient_col, cohort_col]].merge(
@@ -274,14 +290,14 @@ def command_assemble_predictions(args: argparse.Namespace) -> None:
 def command_evaluate(args: argparse.Namespace) -> None:
     frame, config = _load_manifest_and_config(args)
     validate_manifest(frame, config)
-    predictions = pd.read_csv(args.predictions)
+    predictions = _read_patient_table(args.predictions, config.column("patient_id"))
     evaluate_models(frame, predictions, config, args.output_dir)
 
 
 def command_explain(args: argparse.Namespace) -> None:
     frame, config = _load_manifest_and_config(args)
     validate_manifest(frame, config)
-    scores = pd.read_csv(args.vit_scores)
+    scores = _read_patient_table(args.vit_scores, config.column("patient_id"))
     patient_col = config.column("patient_id")
     merged = frame.merge(
         scores[[patient_col, "vit_score_final", "vit_score_oof"]],
@@ -302,6 +318,14 @@ def command_explain(args: argparse.Namespace) -> None:
         config,
         args.output_dir,
     )
+
+
+def command_prepare_biological(args: argparse.Namespace) -> None:
+    frame, config = _load_manifest_and_config(args)
+    validate_manifest(frame, config)
+    scores = _read_patient_table(args.vit_scores, config.column("patient_id"))
+    result = prepare_biological_cohort(frame, scores, config)
+    _write_table(result, args.output)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -390,7 +414,9 @@ def build_parser() -> argparse.ArgumentParser:
     deep.add_argument("--output-dir", required=True, type=Path)
     deep.add_argument("--cache-dir", type=Path)
     deep.add_argument("--device")
-    deep.add_argument("--epochs", type=int)
+    duration_source = deep.add_mutually_exclusive_group()
+    duration_source.add_argument("--epochs", type=int)
+    duration_source.add_argument("--duration-file", type=Path)
     deep.set_defaults(function=command_train_deep)
 
     icvs = subparsers.add_parser("fit-icvs")
@@ -426,6 +452,13 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--patients", type=int, default=500)
     explain.add_argument("--output-dir", required=True, type=Path)
     explain.set_defaults(function=command_explain)
+
+    biological = subparsers.add_parser("prepare-biological-cohort")
+    _common_parser(biological)
+    biological.add_argument("--manifest", required=True, type=Path)
+    biological.add_argument("--vit-scores", required=True, type=Path)
+    biological.add_argument("--output", required=True, type=Path)
+    biological.set_defaults(function=command_prepare_biological)
     return parser
 
 

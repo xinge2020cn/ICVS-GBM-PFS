@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from icvs_gbm_pfs.config import StudyConfig, load_config
 from icvs_gbm_pfs.evaluation import evaluate_models
@@ -64,3 +65,35 @@ def test_locked_evaluation_writes_all_primary_tables(tmp_path: Path) -> None:
     assert len(tables["performance"]) == 3
     assert (tmp_path / "performance.csv").is_file()
     assert (tmp_path / "calibration.csv").is_file()
+
+
+def test_locked_evaluation_rejects_incomplete_patient_coverage(tmp_path: Path) -> None:
+    per_cohort = 10
+    count = per_cohort * 3
+    index = np.arange(count)
+    manifest = pd.DataFrame(
+        {
+            "patient_id": [f"P{value:03d}" for value in index],
+            "cohort": np.repeat(
+                ["training", "temporal_validation", "spatial_validation"], per_cohort
+            ),
+            "center_id": np.repeat(["C1", "C1", "C2"], per_cohort),
+            "pfs_months": 2.0 + (index % per_cohort),
+            "pfs_event": (index % 2).astype(int),
+            "biological_subset": np.zeros(count, dtype=int),
+            "age_years": np.full(count, 55.0),
+            "mgmt_methylated": (index % 2).astype(int),
+            "non_gross_total_resection": (index % 3 == 0).astype(int),
+        }
+    )
+    predictions = pd.DataFrame(
+        {
+            "patient_id": manifest["patient_id"].iloc[:-1],
+            "model": "locked_model",
+            "risk_score": np.linspace(-1.0, 1.0, count - 1),
+        }
+    )
+    for horizon in (6, 12, 18, 24, 30, 36):
+        predictions[f"pfs_{horizon}m"] = np.exp(-0.01 * horizon)
+    with pytest.raises(ValueError, match="exactly one prediction"):
+        evaluate_models(manifest, predictions, evaluation_config(), tmp_path)

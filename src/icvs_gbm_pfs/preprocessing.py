@@ -24,6 +24,18 @@ MODALITY_COLUMNS = {
 }
 
 
+def _same_image_geometry(first: sitk.Image, second: sitk.Image) -> bool:
+    """Return whether two images occupy the same physical voxel grid."""
+
+    return (
+        first.GetDimension() == second.GetDimension()
+        and first.GetSize() == second.GetSize()
+        and np.allclose(first.GetSpacing(), second.GetSpacing(), rtol=0.0, atol=1e-6)
+        and np.allclose(first.GetOrigin(), second.GetOrigin(), rtol=0.0, atol=1e-6)
+        and np.allclose(first.GetDirection(), second.GetDirection(), rtol=0.0, atol=1e-6)
+    )
+
+
 def rigid_register(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
     """Rigidly register one MRI sequence to the anatomical reference."""
 
@@ -80,6 +92,10 @@ def make_resampled_reference(
 ) -> sitk.Image:
     """Create an empty reference image with the requested physical spacing."""
 
+    if len(spacing_xyz) != 3 or not np.isfinite(spacing_xyz).all() or any(
+        value <= 0 for value in spacing_xyz
+    ):
+        raise ValueError("Output spacing must contain three finite positive values.")
     original_size = image.GetSize()
     original_spacing = image.GetSpacing()
     size = tuple(
@@ -138,7 +154,13 @@ def build_tumor_peritumoral_voi(
 ) -> sitk.Image:
     """Combine the tumor core with an in-plane outward margin constrained to brain."""
 
+    if not np.isfinite(margin_mm) or margin_mm <= 0:
+        raise ValueError("The peritumoral margin must be finite and greater than zero.")
+    if not _same_image_geometry(tumor_mask, brain_mask):
+        raise ValueError("Tumor and brain masks must use identical physical geometry.")
     spacing = tumor_mask.GetSpacing()
+    if not np.isfinite(spacing).all() or any(value <= 0 for value in spacing):
+        raise ValueError("Mask spacing must contain finite positive values.")
     radius = [
         max(1, int(math.ceil(margin_mm / spacing[0]))),
         max(1, int(math.ceil(margin_mm / spacing[1]))),
@@ -173,10 +195,14 @@ def process_subject(
     reference = images["ce_t1"]
     brain_mask = sitk.ReadImage(str(row["brain_mask_path"]), sitk.sitkUInt8)
     tumor_mask = sitk.ReadImage(str(row["tumor_mask_path"]), sitk.sitkUInt8)
-    if brain_mask.GetSize() != reference.GetSize():
+    if not _same_image_geometry(brain_mask, reference):
         brain_mask = resample_to_reference(brain_mask, reference, is_mask=True)
-    if tumor_mask.GetSize() != reference.GetSize():
+    if not _same_image_geometry(tumor_mask, reference):
         tumor_mask = resample_to_reference(tumor_mask, reference, is_mask=True)
+    if not np.any(sitk.GetArrayViewFromImage(brain_mask)):
+        raise ValueError(f"Brain mask contains no foreground voxels for patient {patient_id}.")
+    if not np.any(sitk.GetArrayViewFromImage(tumor_mask)):
+        raise ValueError(f"Tumor mask contains no foreground voxels for patient {patient_id}.")
     registered = {"ce_t1": reference}
     for modality in ("t1", "t2", "flair"):
         registered[modality] = rigid_register(images[modality], reference)
@@ -214,13 +240,17 @@ def preprocess_manifest(
 ) -> pd.DataFrame:
     """Preprocess every subject and create a manifest containing derived paths."""
 
-    frame = read_manifest(manifest_path)
+    frame = read_manifest(manifest_path, patient_id_column=config.column("patient_id"))
     validate_manifest(frame, config, require_paths=RAW_IMAGE_COLUMNS)
     settings = config.section("preprocessing")
     spacing = tuple(float(value) for value in settings["output_spacing_mm"])
-    if len(spacing) != 3:
-        raise ValueError("Output spacing must contain three values in x, y, z order.")
+    if len(spacing) != 3 or not np.isfinite(spacing).all() or any(value <= 0 for value in spacing):
+        raise ValueError(
+            "Output spacing must contain three finite positive values in x, y, z order."
+        )
     margin = float(settings["peritumoral_margin_mm"])
+    if not np.isfinite(margin) or margin <= 0:
+        raise ValueError("The peritumoral margin must be finite and greater than zero.")
     derived = []
     for row in frame.to_dict(orient="records"):
         derived.append(
@@ -245,11 +275,24 @@ def load_cropped_volume(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Load the common VOI crop and resize it to the network input geometry."""
 
+    target_shape = tuple(int(value) for value in target_shape_dhw)
+    if len(target_shape) != 3 or any(value <= 0 for value in target_shape):
+        raise ValueError("Target volume shape must contain three positive dimensions.")
     arrays = []
+    reference_image = None
     for modality in ("t1", "t2", "flair", "ce_t1"):
         image = sitk.ReadImage(str(row[f"preprocessed_{modality}_path"]), sitk.sitkFloat32)
-        arrays.append(sitk.GetArrayFromImage(image).astype(np.float32))
+        if reference_image is None:
+            reference_image = image
+        elif not _same_image_geometry(image, reference_image):
+            raise ValueError("Preprocessed MRI volumes must use identical physical geometry.")
+        array = sitk.GetArrayFromImage(image).astype(np.float32)
+        if not np.isfinite(array).all():
+            raise ValueError("Preprocessed MRI volumes must contain only finite intensities.")
+        arrays.append(array)
     mask_image = sitk.ReadImage(str(row["voi_path"]), sitk.sitkUInt8)
+    if reference_image is None or not _same_image_geometry(mask_image, reference_image):
+        raise ValueError("The VOI mask and preprocessed MRI volumes must use identical geometry.")
     mask = sitk.GetArrayFromImage(mask_image) > 0
     if not mask.any():
         raise ValueError("Tumor-peritumoral VOI contains no foreground voxels.")
@@ -263,11 +306,11 @@ def load_cropped_volume(
     mask_tensor = torch.from_numpy(mask_crop).unsqueeze(0).unsqueeze(0)
     tensor = functional.interpolate(
         tensor,
-        size=target_shape_dhw,
+        size=target_shape,
         mode="trilinear",
         align_corners=False,
     ).squeeze(0)
-    mask_tensor = functional.interpolate(mask_tensor, size=target_shape_dhw, mode="nearest")
+    mask_tensor = functional.interpolate(mask_tensor, size=target_shape, mode="nearest")
     mask_tensor = mask_tensor.squeeze(0)
     tensor = tensor * mask_tensor
     return tensor.contiguous(), mask_tensor.contiguous()

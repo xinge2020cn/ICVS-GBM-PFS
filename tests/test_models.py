@@ -27,3 +27,16 @@ def test_resnet_returns_one_log_risk_per_volume() -> None:
     model.eval()
     output = model(torch.zeros(2, 4, 8, 32, 32))
     assert output.shape == (2,)
+
+
+def test_vit_rejects_invalid_channel_count() -> None:
+    model = VisionTransformer3DSurvival(
+        input_shape_dhw=(8, 32, 32),
+        patch_shape_dhw=(4, 16, 16),
+        embedding_dim=32,
+        depth=2,
+        heads=4,
+        head_dim=16,
+    )
+    with pytest.raises(ValueError, match="4 channels"):
+        model(torch.zeros(1, 3, 8, 32, 32))

@@ -23,6 +23,7 @@
     "patient_id": {
       "type": "string",
       "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?$",
       "description": "Nonidentifying patient surrogate unique across all cohorts."
     },
     "cohort": {
@@ -53,23 +54,44 @@
       "enum": [0, 1]
     },
     "t1_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "t2_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "flair_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "ce_t1_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "brain_mask_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "tumor_mask_path": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "biological_subset": {"const": 1}
+        },
+        "required": ["biological_subset"]
+      },
+      "then": {
+        "properties": {
+          "cohort": {"const": "training"}
+        }
+      }
+    }
+  ],
   "additionalProperties": true
 }

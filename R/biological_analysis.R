@@ -15,7 +15,13 @@ parse_arguments <- function(values) {
   }
   result <- list()
   for (index in seq(1, length(values), by = 2)) {
+    if (!startsWith(values[[index]], "--")) {
+      stop("Every argument name must start with --.")
+    }
     key <- sub("^--", "", values[[index]])
+    if (!is.null(result[[key]])) {
+      stop(sprintf("Argument --%s was provided more than once.", key))
+    }
     result[[key]] <- values[[index + 1]]
   }
   result
@@ -31,9 +37,17 @@ require_argument <- function(arguments, name) {
 
 read_gmt <- function(path) {
   lines <- readLines(path, warn = FALSE)
+  if (length(lines) == 0 || any(!nzchar(lines))) {
+    stop("The Hallmark GMT file must contain nonempty gene-set records.")
+  }
   parsed <- strsplit(lines, "\t", fixed = TRUE)
+  if (any(lengths(parsed) < 3)) {
+    stop("Every GMT record must contain a name, description, and at least one gene.")
+  }
+  set_names <- vapply(parsed, `[[`, character(1), 1)
+  if (anyDuplicated(set_names)) stop("Hallmark gene-set names must be unique.")
   sets <- lapply(parsed, function(value) unique(value[-c(1, 2)]))
-  names(sets) <- vapply(parsed, `[[`, character(1), 1)
+  names(sets) <- set_names
   sets
 }
 
@@ -160,23 +174,44 @@ annotation_path <- require_argument(arguments, "gene-annotation")
 hallmark_path <- require_argument(arguments, "hallmark-gmt")
 lm22_path <- require_argument(arguments, "lm22-fractions")
 output_dir <- require_argument(arguments, "output-dir")
-vit_cutoff <- as.numeric(require_argument(arguments, "vit-cutoff"))
 resamples <- as.integer(ifelse(is.null(arguments[["bootstrap-resamples"]]), 3000, arguments[["bootstrap-resamples"]]))
 seed <- as.integer(ifelse(is.null(arguments[["seed"]]), 2026, arguments[["seed"]]))
 
-if (!is.finite(vit_cutoff)) stop("The ViT cutoff must be finite.")
 if (resamples < 100) stop("At least 100 bootstrap resamples are required.")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 set.seed(seed)
 
-cohort <- read_csv(cohort_path, show_col_types = FALSE) %>%
+cohort_input <- read_csv(
+  cohort_path,
+  col_types = cols(patient_id = col_character(), .default = col_guess()),
+  show_col_types = FALSE
+)
+if (is.null(arguments[["vit-cutoff"]])) {
+  if (!"vit_cutoff" %in% names(cohort_input)) {
+    stop("Provide --vit-cutoff or a vit_cutoff column in the biological cohort file.")
+  }
+  cutoff_values <- unique(suppressWarnings(as.numeric(cohort_input$vit_cutoff)))
+  if (length(cutoff_values) != 1 || !is.finite(cutoff_values[[1]])) {
+    stop("The biological cohort file must contain one finite locked ViT cutoff.")
+  }
+  vit_cutoff <- as.numeric(cutoff_values[[1]])
+} else {
+  vit_cutoff <- as.numeric(arguments[["vit-cutoff"]])
+}
+if (!is.finite(vit_cutoff)) stop("The ViT cutoff must be finite.")
+
+cohort <- cohort_input %>%
   select(patient_id, vit_score) %>%
   mutate(
     patient_id = as.character(patient_id),
-    vit_group = factor(if_else(vit_score >= vit_cutoff, "High", "Low"), levels = c("Low", "High"))
+    vit_group = factor(if_else(vit_score > vit_cutoff, "High", "Low"), levels = c("Low", "High"))
   ) %>%
   arrange(patient_id)
 
+if (nrow(cohort) == 0) stop("The biological cohort must contain at least one patient.")
+if (any(is.na(cohort$patient_id)) || any(!nzchar(cohort$patient_id))) {
+  stop("Cohort patient identifiers must be nonempty.")
+}
 if (anyDuplicated(cohort$patient_id)) stop("Cohort patient identifiers must be unique.")
 if (any(!is.finite(cohort$vit_score))) stop("ViT scores must be finite.")
 if (length(unique(cohort$vit_group)) != 2) stop("The locked cutoff must create two groups.")
@@ -185,8 +220,27 @@ annotation <- read_tsv(annotation_path, show_col_types = FALSE) %>%
   filter(gene_type == "protein_coding") %>%
   distinct(gene_symbol)
 counts_frame <- read_csv(counts_path, show_col_types = FALSE)
+if (ncol(counts_frame) < 2) stop("RNA counts must contain a gene column and patient columns.")
 gene_symbols <- as.character(counts_frame[[1]])
-counts <- as.matrix(counts_frame[, -1])
+if (any(is.na(gene_symbols)) || any(!nzchar(gene_symbols))) {
+  stop("RNA count gene symbols must be nonempty.")
+}
+raw_counts <- as.matrix(counts_frame[, -1])
+counts <- suppressWarnings(
+  matrix(
+    as.numeric(raw_counts),
+    nrow = nrow(raw_counts),
+    ncol = ncol(raw_counts),
+    dimnames = dimnames(raw_counts)
+  )
+)
+if (any(!is.finite(counts)) || any(counts < 0)) {
+  stop("RNA counts must be finite and nonnegative.")
+}
+if (any(abs(counts - round(counts)) > sqrt(.Machine$double.eps))) {
+  stop("RNA counts must be unnormalized integer values.")
+}
+if (any(counts > .Machine$integer.max)) stop("RNA counts exceed the supported integer range.")
 storage.mode(counts) <- "integer"
 rownames(counts) <- gene_symbols
 if (anyDuplicated(rownames(counts))) stop("RNA count gene symbols must be unique.")
@@ -295,14 +349,26 @@ write_csv(
   file.path(output_dir, "hallmark_ssgsea_scores.csv")
 )
 
-fractions <- read_csv(lm22_path, show_col_types = FALSE) %>%
+fractions <- read_csv(
+  lm22_path,
+  col_types = cols(patient_id = col_character(), .default = col_guess()),
+  show_col_types = FALSE
+) %>%
   mutate(patient_id = as.character(patient_id))
 if (anyDuplicated(fractions$patient_id)) stop("LM22 patient identifiers must be unique.")
 if (!all(cohort$patient_id %in% fractions$patient_id)) stop("LM22 fractions are missing cohort patients.")
 fractions <- fractions[match(cohort$patient_id, fractions$patient_id), ]
 cell_columns <- setdiff(names(fractions), "patient_id")
 fraction_matrix <- as.matrix(fractions[, cell_columns])
-storage.mode(fraction_matrix) <- "double"
+fraction_matrix <- suppressWarnings(
+  matrix(
+    as.numeric(fraction_matrix),
+    nrow = nrow(fraction_matrix),
+    ncol = ncol(fraction_matrix),
+    dimnames = dimnames(fraction_matrix)
+  )
+)
+if (any(!is.finite(fraction_matrix))) stop("LM22 fractions must be finite numeric values.")
 fraction_matrix[fraction_matrix < 0] <- 0
 row_totals <- rowSums(fraction_matrix)
 if (any(row_totals <= 0)) stop("LM22 fractions must have a positive row sum for every patient.")

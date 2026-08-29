@@ -44,3 +44,19 @@ def test_volume_crop_has_locked_network_geometry(tmp_path: Path) -> None:
     assert volume.shape == (4, 8, 32, 32)
     assert resized_mask.shape == (1, 8, 32, 32)
     assert volume[3].max().item() == pytest.approx(4.0)
+
+
+def test_volume_crop_rejects_mismatched_physical_geometry(tmp_path: Path) -> None:
+    paths = {}
+    for modality in ("t1", "t2", "flair", "ce_t1"):
+        image = sitk.GetImageFromArray(np.ones((4, 8, 8), dtype=np.float32))
+        if modality == "t2":
+            image.SetOrigin((1.0, 0.0, 0.0))
+        path = tmp_path / f"{modality}.nii.gz"
+        sitk.WriteImage(image, str(path))
+        paths[f"preprocessed_{modality}_path"] = str(path)
+    mask = sitk.GetImageFromArray(np.ones((4, 8, 8), dtype=np.uint8))
+    mask_path = tmp_path / "voi.nii.gz"
+    sitk.WriteImage(mask, str(mask_path))
+    with pytest.raises(ValueError, match="identical physical geometry"):
+        load_cropped_volume({**paths, "voi_path": str(mask_path)}, (4, 8, 8))

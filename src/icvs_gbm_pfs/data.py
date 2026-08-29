@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .config import StudyConfig
@@ -40,13 +41,17 @@ class ManifestAudit:
     biological_subset: int
 
 
-def read_manifest(path: str | Path) -> pd.DataFrame:
+def read_manifest(
+    path: str | Path,
+    *,
+    patient_id_column: str = "patient_id",
+) -> pd.DataFrame:
     """Read a patient-level CSV manifest and resolve all path columns."""
 
     source = Path(path).resolve()
     if not source.is_file():
         raise FileNotFoundError(f"Manifest not found: {source}")
-    frame = pd.read_csv(source)
+    frame = pd.read_csv(source, dtype={patient_id_column: "string"})
     frame.attrs["source"] = source
     for column in (*RAW_IMAGE_COLUMNS, *PROCESSED_IMAGE_COLUMNS):
         if column in frame:
@@ -80,19 +85,54 @@ def validate_manifest(
     time_col = config.column("pfs_time")
     event_col = config.column("pfs_event")
     subset_col = config.column("biological_subset")
-    required = [patient_col, cohort_col, center_col, time_col, event_col]
+    age_col = config.column("age")
+    mgmt_col = config.column("mgmt")
+    resection_col = config.column("extent_of_resection")
+    required = [
+        patient_col,
+        cohort_col,
+        center_col,
+        time_col,
+        event_col,
+        subset_col,
+        age_col,
+        mgmt_col,
+        resection_col,
+    ]
     missing = [column for column in required if column not in frame]
     if missing:
         raise ValueError(f"Manifest is missing required columns: {', '.join(missing)}")
     if frame.empty:
         raise ValueError("Manifest contains no patients.")
-    if frame[patient_col].isna().any() or (frame[patient_col].astype(str).str.len() == 0).any():
+    patient_ids = frame[patient_col].astype("string")
+    if patient_ids.isna().any() or patient_ids.str.strip().eq("").any():
         raise ValueError("Every row must contain a nonempty surrogate patient identifier.")
-    duplicated = frame.loc[frame[patient_col].duplicated(keep=False), patient_col].astype(str)
+    if not patient_ids.str.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*").all():
+        raise ValueError(
+            "Patient identifiers may contain only ASCII letters, numbers, periods, underscores, "
+            "and hyphens, and must start with a letter or number."
+        )
+    if patient_ids.str.endswith(".").any():
+        raise ValueError("Patient identifiers must not end with a period.")
+    reserved_names = {
+        "aux",
+        "clock$",
+        "con",
+        "nul",
+        "prn",
+        *{f"com{index}" for index in range(1, 10)},
+        *{f"lpt{index}" for index in range(1, 10)},
+    }
+    if patient_ids.str.split(".").str[0].str.casefold().isin(reserved_names).any():
+        raise ValueError("Patient identifiers must not use reserved filesystem names.")
+    normalized_ids = patient_ids.str.casefold()
+    duplicated = frame.loc[normalized_ids.duplicated(keep=False), patient_col].astype(str)
     if not duplicated.empty:
         values = ", ".join(sorted(duplicated.unique())[:10])
-        raise ValueError(f"Patient identifiers are not unique: {values}")
-    unsafe = frame[patient_col].astype(str).map(_looks_like_direct_identifier)
+        raise ValueError(
+            "Patient identifiers are not unique under case-insensitive matching: " + values
+        )
+    unsafe = patient_ids.map(_looks_like_direct_identifier)
     if unsafe.any():
         raise ValueError(
             "Patient identifiers must be nonidentifying surrogates without names, dates, or paths."
@@ -102,28 +142,41 @@ def validate_manifest(
         config.cohort("temporal_validation"),
         config.cohort("spatial_validation"),
     }
-    observed_cohorts = set(frame[cohort_col].dropna().astype(str))
+    cohort_labels = frame[cohort_col].astype("string")
+    if cohort_labels.isna().any() or cohort_labels.str.strip().eq("").any():
+        raise ValueError("Every row must contain a cohort label.")
+    observed_cohorts = set(cohort_labels.astype(str))
     unknown = sorted(observed_cohorts.difference(allowed_cohorts))
     if unknown:
         raise ValueError(f"Unknown cohort labels: {', '.join(unknown)}")
     absent = sorted(allowed_cohorts.difference(observed_cohorts))
     if absent:
         raise ValueError(f"Required cohorts are absent: {', '.join(absent)}")
+    centers = frame[center_col].astype("string")
+    if centers.isna().any() or centers.str.strip().eq("").any():
+        raise ValueError("Every row must contain a nonempty center identifier.")
     time = pd.to_numeric(frame[time_col], errors="coerce")
-    if time.isna().any() or (time <= 0).any():
+    if not np.isfinite(time.to_numpy(float)).all() or (time <= 0).any():
         raise ValueError("Progression-free survival times must be finite and greater than zero.")
     event = pd.to_numeric(frame[event_col], errors="coerce")
-    if event.isna().any() or not set(event.astype(int).unique()).issubset({0, 1}):
+    if event.isna().any() or not event.isin([0, 1]).all():
         raise ValueError("Progression-free survival event values must be binary.")
-    if subset_col in frame:
-        subset = pd.to_numeric(frame[subset_col], errors="coerce").fillna(0).astype(int)
-        if not set(subset.unique()).issubset({0, 1}):
-            raise ValueError("Biological-subset membership must be binary.")
-        invalid_subset = subset.eq(1) & frame[cohort_col].ne(config.cohort("training"))
-        if invalid_subset.any():
-            raise ValueError("The biological subset must be nested within the training cohort.")
-    else:
-        subset = pd.Series(0, index=frame.index, dtype=int)
+    subset = pd.to_numeric(frame[subset_col], errors="coerce")
+    if subset.isna().any() or not subset.isin([0, 1]).all():
+        raise ValueError("Biological-subset membership must be binary.")
+    invalid_subset = subset.eq(1) & frame[cohort_col].ne(config.cohort("training"))
+    if invalid_subset.any():
+        raise ValueError("The biological subset must be nested within the training cohort.")
+    age = pd.to_numeric(frame[age_col], errors="coerce")
+    if not np.isfinite(age.to_numpy(float)).all() or (age < 18).any():
+        raise ValueError("Age values must be finite and at least 18 years.")
+    for column, label in (
+        (mgmt_col, "MGMT promoter methylation"),
+        (resection_col, "Extent of resection"),
+    ):
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.isna().any() or not values.isin([0, 1]).all():
+            raise ValueError(f"{label} values must use binary zero-one coding.")
     if enforce_spatial_independence:
         training_centers = set(
             frame.loc[frame[cohort_col].eq(config.cohort("training")), center_col].astype(str)

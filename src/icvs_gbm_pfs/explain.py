@@ -34,7 +34,7 @@ def _feature_matrix(
     vit_score_column: str,
 ) -> np.ndarray:
     vit = scaler.transform(frame[[vit_score_column]]).reshape(-1)
-    return np.column_stack(
+    matrix = np.column_stack(
         [
             frame[config.column("age")].to_numpy(float),
             frame[config.column("mgmt")].to_numpy(float),
@@ -42,6 +42,9 @@ def _feature_matrix(
             vit,
         ]
     )
+    if not np.isfinite(matrix).all():
+        raise ValueError("Explanation predictors must contain only finite values.")
+    return matrix
 
 
 def select_explanation_patients(
@@ -52,6 +55,10 @@ def select_explanation_patients(
 ) -> pd.DataFrame:
     """Select a deterministic cohort-proportional patient set without using outcomes."""
 
+    if total <= 0:
+        raise ValueError("The requested explanation sample size must be greater than zero.")
+    if frame.empty:
+        raise ValueError("Explanation selection requires at least one patient.")
     if total >= len(frame):
         return frame.copy().reset_index(drop=True)
     cohort_col = config.column("cohort")
@@ -88,6 +95,10 @@ def exact_time_dependent_shapley(
     feature_names = list(artifact["feature_order"])
     if len(feature_names) != 4:
         raise ValueError("Exact ICVS Shapley analysis requires exactly four predictors.")
+    if background_frame.empty or explanation_frame.empty:
+        raise ValueError("Shapley analysis requires nonempty background and explanation cohorts.")
+    if not background_frame[config.column("cohort")].eq(config.cohort("training")).all():
+        raise ValueError("The Shapley background must contain training-cohort patients only.")
     if background_frame[oof_vit_score_column].isna().any():
         raise ValueError("Training background rows require out-of-fold ViT scores.")
     background = _feature_matrix(
@@ -171,9 +182,15 @@ def exact_time_dependent_shapley(
         .groupby(["horizon_months", "feature"], as_index=False)
         .agg(mean_absolute_shapley=("absolute_shapley", "mean"))
     )
-    summary["relative_contribution"] = summary["mean_absolute_shapley"] / summary.groupby(
-        "horizon_months"
-    )["mean_absolute_shapley"].transform("sum")
+    contribution_total = summary.groupby("horizon_months")["mean_absolute_shapley"].transform(
+        "sum"
+    )
+    summary["relative_contribution"] = np.divide(
+        summary["mean_absolute_shapley"],
+        contribution_total,
+        out=np.full(len(summary), np.nan, dtype=float),
+        where=contribution_total.to_numpy(float) > 0,
+    )
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     values.to_csv(output / "icvs_time_dependent_shapley_values.csv", index=False)

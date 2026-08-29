@@ -39,3 +39,31 @@ def test_breslow_baseline_and_survival_probability() -> None:
     assert survival[0, 0] == pytest.approx(1.0)
     assert survival[0, 1] == pytest.approx(np.exp(-0.5))
     assert survival[0, 2] == pytest.approx(np.exp(-0.5))
+
+
+def test_structured_survival_rejects_fractional_event_values() -> None:
+    from icvs_gbm_pfs.survival import structured_survival
+
+    with pytest.raises(ValueError, match="binary"):
+        structured_survival(np.array([1.0, 0.5]), np.array([1.0, 2.0]))
+
+
+def test_breslow_baseline_is_stable_for_large_log_risk() -> None:
+    times, cumulative = breslow_baseline_hazard(
+        np.array([1.0, 2.0]),
+        np.array([1, 0]),
+        np.array([700.0, 700.0]),
+    )
+    assert times.tolist() == [1.0]
+    assert np.isfinite(cumulative).all()
+    assert cumulative[0] > 0.0
+
+
+def test_breslow_does_not_merge_close_distinct_event_times() -> None:
+    times, cumulative = breslow_baseline_hazard(
+        np.array([100.0, 100.0005]),
+        np.array([1, 1]),
+        np.array([0.0, 0.0]),
+    )
+    assert times.tolist() == [100.0, 100.0005]
+    assert cumulative.tolist() == pytest.approx([0.5, 1.5])

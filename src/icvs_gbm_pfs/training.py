@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +33,8 @@ class TrainingResult:
     epochs_completed: int
     best_epoch: int
     history: list[dict[str, float]]
+    development_patient_ids: tuple[str, ...] = ()
+    validation_patient_ids: tuple[str, ...] = ()
 
 
 class RiskSetSampler:
@@ -100,6 +102,10 @@ def survival_strata(
                 for value, event_value in zip(strata, event, strict=True)
             ]
         )
+    if (pd.Series(strata).value_counts() < minimum_count).any():
+        strata = event.astype(str)
+    if (pd.Series(strata).value_counts() < minimum_count).any():
+        strata = np.repeat("all", len(frame))
     return strata
 
 
@@ -121,6 +127,10 @@ def predict_log_risk(
 ) -> np.ndarray:
     """Predict continuous log-risk scores in manifest order."""
 
+    if len(dataset) == 0:
+        raise ValueError("Prediction requires at least one patient.")
+    if batch_size <= 0:
+        raise ValueError("Prediction batch size must be greater than zero.")
     model.eval()
     predictions = []
     with torch.inference_mode():
@@ -165,12 +175,22 @@ def fit_deep_survival_model(
 ) -> TrainingResult:
     """Fit a network using sampled Cox risk sets and patient-level validation."""
 
+    if epochs <= 0:
+        raise ValueError("Training epochs must be greater than zero.")
+    if patience is not None and patience <= 0:
+        raise ValueError("Early-stopping patience must be greater than zero.")
+    if validation_frame is not None and not validation_frame[
+        config.column("pfs_event")
+    ].astype(bool).any():
+        raise ValueError("The tuning partition must contain at least one observed event.")
     set_global_seed(config.seed + seed_offset)
     settings = config.section("deep_survival")
     model_settings = settings[model_name]
     optimization = settings["optimization"]
     physical_batch_size = int(model_settings["physical_batch_size"])
     accumulation_steps = int(model_settings["accumulation_steps"])
+    if accumulation_steps <= 0:
+        raise ValueError("Gradient-accumulation steps must be greater than zero.")
     training_dataset = SurvivalVolumeDataset(
         training_frame,
         config,
@@ -225,12 +245,14 @@ def fit_deep_survival_model(
         cumulative_loss = 0.0
         risk_sets = sampler.epoch()
         for step, indices in enumerate(risk_sets, start=1):
+            group_start = ((step - 1) // accumulation_steps) * accumulation_steps
+            group_size = min(accumulation_steps, len(risk_sets) - group_start)
             images = _stack_risk_set(training_dataset, indices, device)
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 risk = model(images)
-                loss = sampled_risk_set_loss(risk) / accumulation_steps
+                loss = sampled_risk_set_loss(risk) / group_size
             scaler.scale(loss).backward()
-            cumulative_loss += float(loss.detach().cpu()) * accumulation_steps
+            cumulative_loss += float(loss.detach().cpu()) * group_size
             if step % accumulation_steps == 0 or step == len(risk_sets):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
@@ -302,12 +324,13 @@ def select_training_duration(
     development = training_frame.iloc[development_indices].reset_index(drop=True)
     tuning = training_frame.iloc[tuning_indices].reset_index(drop=True)
     target_shape = config.section("preprocessing")["target_shape_dhw"]
+    set_global_seed(config.seed)
     model = build_deep_survival_model(
         model_name,
         config.section("deep_survival"),
         target_shape_dhw=target_shape,
     )
-    return fit_deep_survival_model(
+    result = fit_deep_survival_model(
         model,
         development,
         config,
@@ -317,6 +340,12 @@ def select_training_duration(
         epochs=int(optimization["maximum_tuning_epochs"]),
         validation_frame=tuning,
         patience=int(optimization["early_stopping_patience"]),
+    )
+    patient_col = config.column("patient_id")
+    return replace(
+        result,
+        development_patient_ids=tuple(development[patient_col].astype(str)),
+        validation_patient_ids=tuple(tuning[patient_col].astype(str)),
     )
 
 
@@ -345,16 +374,21 @@ def run_crossfit_and_refit(
     if training.empty:
         raise ValueError("The training cohort is empty.")
     settings = config.section("deep_survival")
-    epochs = int(epochs_override or settings[model_name]["epochs"])
+    epochs = int(settings[model_name]["epochs"] if epochs_override is None else epochs_override)
+    if epochs <= 0:
+        raise ValueError("Training epochs must be greater than zero.")
     folds = int(settings["optimization"]["crossfit_folds"])
     splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=config.seed)
     out_of_fold = np.full(len(training), np.nan, dtype=float)
     target_shape = config.section("preprocessing")["target_shape_dhw"]
+    horizons = np.asarray(config.section("icvs")["horizons_months"], dtype=float)
+    out_of_fold_survival = np.full((len(training), len(horizons)), np.nan, dtype=float)
     fold_records = []
     fold_assignments = []
     for fold, (fit_indices, held_out_indices) in enumerate(
         splitter.split(training, survival_strata(training, config, minimum_count=folds))
     ):
+        set_global_seed(config.seed + fold + 1)
         model = build_deep_survival_model(
             model_name,
             settings,
@@ -372,17 +406,41 @@ def run_crossfit_and_refit(
         )
         model.load_state_dict(result.state_dict)
         model.to(device)
+        fit_dataset = SurvivalVolumeDataset(
+            training.iloc[fit_indices].reset_index(drop=True),
+            config,
+            augment=False,
+            cache_dir=cache_dir,
+        )
         held_out_dataset = SurvivalVolumeDataset(
             training.iloc[held_out_indices].reset_index(drop=True),
             config,
             augment=False,
             cache_dir=cache_dir,
         )
-        out_of_fold[held_out_indices] = predict_log_risk(
+        fit_scores = predict_log_risk(
+            model,
+            fit_dataset,
+            device=device,
+            batch_size=int(settings[model_name]["physical_batch_size"]),
+        )
+        held_out_scores = predict_log_risk(
             model,
             held_out_dataset,
             device=device,
             batch_size=int(settings[model_name]["physical_batch_size"]),
+        )
+        out_of_fold[held_out_indices] = held_out_scores
+        fold_event_times, fold_cumulative_hazard = breslow_baseline_hazard(
+            training.iloc[fit_indices][config.column("pfs_time")].to_numpy(float),
+            training.iloc[fit_indices][config.column("pfs_event")].to_numpy(bool),
+            fit_scores,
+        )
+        out_of_fold_survival[held_out_indices] = predict_survival_probabilities(
+            held_out_scores,
+            fold_event_times,
+            fold_cumulative_hazard,
+            horizons,
         )
         fold_path = output / f"{model_name}_fold_{fold}.pt"
         torch.save(
@@ -395,6 +453,10 @@ def run_crossfit_and_refit(
                 .astype(str)
                 .tolist(),
                 "epochs": epochs,
+                "event_times": fold_event_times,
+                "baseline_cumulative_hazard": fold_cumulative_hazard,
+                "seed": config.seed + fold + 1,
+                "history": result.history,
             },
             fold_path,
         )
@@ -404,6 +466,7 @@ def run_crossfit_and_refit(
                 "fit_patients": len(fit_indices),
                 "held_out_patients": len(held_out_indices),
                 "epochs": epochs,
+                "seed": config.seed + fold + 1,
             }
         )
         fold_assignments.extend(
@@ -413,10 +476,11 @@ def run_crossfit_and_refit(
             }
             for patient_id in training.iloc[held_out_indices][patient_col]
         )
-    if not np.isfinite(out_of_fold).all():
+    if not np.isfinite(out_of_fold).all() or not np.isfinite(out_of_fold_survival).all():
         raise RuntimeError(
-            "Cross-fitting did not produce exactly one score for every training patient."
+            "Cross-fitting did not produce one complete prediction for every training patient."
         )
+    set_global_seed(config.seed + folds + 1)
     final_model = build_deep_survival_model(
         model_name,
         settings,
@@ -451,24 +515,13 @@ def run_crossfit_and_refit(
         training[config.column("pfs_event")].to_numpy(bool),
         final_scores[training_positions],
     )
-    oof_event_times, oof_cumulative_hazard = breslow_baseline_hazard(
-        training[config.column("pfs_time")].to_numpy(float),
-        training[config.column("pfs_event")].to_numpy(bool),
-        out_of_fold,
-    )
-    horizons = np.asarray(config.section("icvs")["horizons_months"], dtype=float)
     survival = predict_survival_probabilities(
         final_scores,
         event_times,
         cumulative_hazard,
         horizons,
     )
-    survival[training_positions] = predict_survival_probabilities(
-        out_of_fold,
-        oof_event_times,
-        oof_cumulative_hazard,
-        horizons,
-    )
+    survival[training_positions] = out_of_fold_survival
     for horizon_index, horizon in enumerate(horizons):
         score_table[f"{model_name}_pfs_{int(horizon)}m"] = survival[:, horizon_index]
     score_table.to_csv(output / f"{model_name}_scores.csv", index=False)
@@ -484,6 +537,7 @@ def run_crossfit_and_refit(
         "baseline_cumulative_hazard": cumulative_hazard,
         "horizons_months": horizons,
         "epochs": epochs,
+        "seed": config.seed + folds + 1,
         "training_patient_ids": training[patient_col].astype(str).tolist(),
         "configuration": settings,
     }

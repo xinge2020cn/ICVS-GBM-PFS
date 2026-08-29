@@ -25,6 +25,8 @@ def _clinical_matrix(frame: pd.DataFrame, config: StudyConfig) -> np.ndarray:
         raise ValueError("MGMT promoter methylation must use binary zero-one coding.")
     if not set(np.unique(non_gtr)).issubset({0.0, 1.0}):
         raise ValueError("Extent of resection must use binary zero-one coding.")
+    if np.any(age_per_decade < 1.8):
+        raise ValueError("Age values must be at least 18 years.")
     return matrix
 
 
@@ -39,6 +41,8 @@ def fit_clinical_model(
     cohort_col = config.column("cohort")
     training_mask = manifest[cohort_col].eq(config.cohort("training")).to_numpy()
     training = manifest.loc[training_mask]
+    if training.empty:
+        raise ValueError("The training cohort is empty.")
     training_features = _clinical_matrix(training, config)
     all_features = _clinical_matrix(manifest, config)
     outcome = structured_survival(
@@ -47,6 +51,14 @@ def fit_clinical_model(
     model = CoxPHSurvivalAnalysis(alpha=1e-8, ties="breslow").fit(training_features, outcome)
     risk = model.predict(all_features)
     horizons = np.asarray(config.section("icvs")["horizons_months"], dtype=float)
+    if (
+        horizons.ndim != 1
+        or horizons.size == 0
+        or not np.isfinite(horizons).all()
+        or np.any(horizons <= 0)
+        or np.any(np.diff(horizons) <= 0)
+    ):
+        raise ValueError("Clinical-model horizons must be strictly increasing positive values.")
     functions = model.predict_survival_function(all_features)
     survival = np.column_stack(
         [[float(function(horizon)) for function in functions] for horizon in horizons]

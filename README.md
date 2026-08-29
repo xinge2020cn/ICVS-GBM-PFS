@@ -26,7 +26,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[radiomics,segmentation,test]"
 ```
 
-PyTorch must match the locally installed CUDA runtime. The study configuration records the framework-level parameters, while each run writes an `environment.json` file containing the installed package versions and compute device.
+PyTorch must match the locally installed CUDA runtime. The study configuration records the framework-level parameters, while each cross-fitting run writes an `environment.json` file containing the installed package versions and compute device.
 
 The biological analysis requires R and the following packages:
 
@@ -96,6 +96,7 @@ icvs-gbm-pfs train-nnunet \
 ```
 
 Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, and patient-level volume pairs for Bland-Altman analysis.
+Cases without predicted foreground retain infinite patient-level HD95 values. Cohort HD95 summaries report the evaluable and nonfinite case counts separately and calculate intervals only from finite distances.
 
 ```bash
 icvs-gbm-pfs evaluate-segmentation \
@@ -106,7 +107,7 @@ icvs-gbm-pfs evaluate-segmentation \
 
 ## Radiomics
 
-`configs/radiomics.yaml` fixes the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. The model performs univariable Cox screening, 10-fold LASSO-Cox penalty selection with the one-standard-error rule, and final multivariable Cox fitting.
+`configs/radiomics.yaml` fixes the discretization width, feature classes, coif1 wavelet decomposition, and Laplacian-of-Gaussian scales. Extraction uses the combined VOI and all four registered sequences. Modality-independent shape features are retained once, while first-order and texture features remain sequence-specific. Standardization is fitted in the training cohort and applied unchanged to locked cohorts. The model performs univariable Cox screening, 10-fold LASSO-Cox penalty selection with the one-standard-error rule, and final multivariable Cox fitting.
 
 ```bash
 icvs-gbm-pfs extract-radiomics \
@@ -136,11 +137,19 @@ icvs-gbm-pfs select-duration \
   --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
   --output "$ICVS_GBM_PFS_VIT_DURATION"
 
+icvs-gbm-pfs select-duration \
+  --config configs/study.yaml \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --model resnet \
+  --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --output "$ICVS_GBM_PFS_RESNET_DURATION"
+
 icvs-gbm-pfs train-deep \
   --config configs/study.yaml \
   --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --model vit \
   --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --duration-file "$ICVS_GBM_PFS_VIT_DURATION" \
   --output-dir "$ICVS_GBM_PFS_VIT_RESULTS"
 
 icvs-gbm-pfs train-deep \
@@ -148,10 +157,11 @@ icvs-gbm-pfs train-deep \
   --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
   --model resnet \
   --cache-dir "$ICVS_GBM_PFS_VOLUME_CACHE" \
+  --duration-file "$ICVS_GBM_PFS_RESNET_DURATION" \
   --output-dir "$ICVS_GBM_PFS_RESNET_RESULTS"
 ```
 
-The augmentation path applies one spatial transform to all four MRI channels. It includes bounded rotation, translation, scaling, intensity shift and scale, Gaussian noise, and smoothing. Left-right flipping is not used.
+The augmentation path applies one spatial transform to all four MRI channels and the VOI mask. It includes bounded rotation, translation, scaling, intensity shift and scale, Gaussian noise, and smoothing while preserving zero-valued background outside the transformed VOI. Left-right flipping is not used. Training-cohort survival probabilities are estimated with the baseline hazard from the corresponding cross-fitting training fold; the held-out patient's outcome is not used for that prediction.
 
 ## Clinical and integrated models
 
@@ -208,6 +218,16 @@ icvs-gbm-pfs explain-icvs \
 
 ## Transcriptomic analysis
 
+The biological cohort is generated directly from the prespecified nested subset. It uses out-of-fold ViT scores and carries the median cutoff estimated from the complete training cohort, preventing final-model scores or a subset-derived threshold from entering this analysis.
+
+```bash
+icvs-gbm-pfs prepare-biological-cohort \
+  --config configs/study.yaml \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --vit-scores "$ICVS_GBM_PFS_VIT_RESULTS/vit_scores.csv" \
+  --output "$ICVS_GBM_PFS_BIOLOGICAL_COHORT"
+```
+
 The R workflow restricts counts to GENCODE protein-coding genes, applies the prespecified expression filter, fits DESeq2, runs Hallmark preranked GSEA and ssGSEA, computes groupwise and continuous pathway statistics with separate FDR families, and evaluates the prespecified total-macrophage aggregate separately from the 22 exploratory LM22 populations.
 
 ```bash
@@ -217,7 +237,6 @@ Rscript R/biological_analysis.R \
   --gene-annotation "$ICVS_GBM_PFS_GENCODE_REFERENCE" \
   --hallmark-gmt "$ICVS_GBM_PFS_HALLMARK_GMT" \
   --lm22-fractions "$ICVS_GBM_PFS_LM22_FRACTIONS" \
-  --vit-cutoff "$ICVS_GBM_PFS_VIT_CUTOFF" \
   --bootstrap-resamples 3000 \
   --seed 2026 \
   --output-dir "$ICVS_GBM_PFS_BIOLOGY_RESULTS"

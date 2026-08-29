@@ -26,3 +26,9 @@ def test_missing_prediction_is_reported_as_complete_failure() -> None:
     assert metrics["surface_dice"] == pytest.approx(0.0)
     assert metrics["sensitivity"] == pytest.approx(0.0)
     assert np.isinf(metrics["hd95_mm"])
+
+
+def test_segmentation_metrics_reject_invalid_spacing() -> None:
+    mask = np.ones((2, 2, 2), dtype=bool)
+    with pytest.raises(ValueError, match="spacing"):
+        segmentation_metrics(mask, mask, (1.0, 0.0, 1.0))

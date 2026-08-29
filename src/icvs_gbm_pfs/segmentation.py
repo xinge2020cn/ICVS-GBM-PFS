@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -19,6 +20,39 @@ from scipy import ndimage
 from .config import StudyConfig
 
 
+def _same_image_geometry(first: sitk.Image, second: sitk.Image) -> bool:
+    return (
+        first.GetDimension() == second.GetDimension()
+        and first.GetSize() == second.GetSize()
+        and np.allclose(first.GetSpacing(), second.GetSpacing(), rtol=0.0, atol=1e-6)
+        and np.allclose(first.GetOrigin(), second.GetOrigin(), rtol=0.0, atol=1e-6)
+        and np.allclose(first.GetDirection(), second.GetDirection(), rtol=0.0, atol=1e-6)
+    )
+
+
+def _validate_nnunet_case(record: dict[str, object]) -> None:
+    image_columns = (
+        "preprocessed_t1_path",
+        "preprocessed_t2_path",
+        "preprocessed_flair_path",
+        "preprocessed_ce_t1_path",
+    )
+    images = [sitk.ReadImage(str(record[column])) for column in image_columns]
+    reference = images[0]
+    if reference.GetDimension() != 3 or any(
+        not _same_image_geometry(reference, image) for image in images[1:]
+    ):
+        raise ValueError("Each nnU-Net case must contain four images with identical 3D geometry.")
+    label = sitk.ReadImage(str(record["preprocessed_tumor_mask_path"]), sitk.sitkUInt8)
+    if not _same_image_geometry(reference, label):
+        raise ValueError("The nnU-Net image channels and tumor mask must use identical geometry.")
+    label_array = sitk.GetArrayViewFromImage(label)
+    if not np.isin(label_array, [0, 1]).all():
+        raise ValueError("The nnU-Net tumor mask must contain only labels zero and one.")
+    if not np.any(label_array == 1):
+        raise ValueError("The nnU-Net tumor mask must contain foreground label one.")
+
+
 def prepare_nnunet_dataset(
     frame: pd.DataFrame,
     config: StudyConfig,
@@ -31,6 +65,8 @@ def prepare_nnunet_dataset(
     training = frame.loc[frame[cohort_col].eq(config.cohort("training"))].copy()
     if training.empty:
         raise ValueError("The training cohort is empty.")
+    if training[patient_col].duplicated().any():
+        raise ValueError("Training patient identifiers must be unique.")
     required = [
         patient_col,
         "preprocessed_t1_path",
@@ -44,12 +80,17 @@ def prepare_nnunet_dataset(
         raise ValueError(f"Manifest is missing nnU-Net columns: {', '.join(missing)}")
     dataset_id = int(config.section("segmentation")["dataset_id"])
     dataset_dir = Path(nnunet_raw).resolve() / f"Dataset{dataset_id:03d}_GBMTumorCore"
+    if dataset_dir.exists() and any(dataset_dir.iterdir()):
+        raise FileExistsError(
+            f"The nnU-Net dataset directory must be empty before preparation: {dataset_dir}"
+        )
     images_dir = dataset_dir / "imagesTr"
     labels_dir = dataset_dir / "labelsTr"
     images_dir.mkdir(parents=True, exist_ok=True)
     labels_dir.mkdir(parents=True, exist_ok=True)
     mapping = []
     for index, row in enumerate(training.to_dict(orient="records"), start=1):
+        _validate_nnunet_case(row)
         case_id = f"GBMTC_{index:04d}"
         for channel, column in enumerate(
             (
@@ -103,6 +144,7 @@ def run_nnunet_training(
     settings = config.section("segmentation")
     dataset_id = str(int(settings["dataset_id"]))
     configuration = str(settings["configuration"])
+    _validate_nnunet_training_duration(config, trainer)
     with nnunet_environment(raw, preprocessed, results) as environment:
         subprocess.run(
             ["nnUNetv2_plan_and_preprocess", "-d", dataset_id, "--verify_dataset_integrity"],
@@ -123,6 +165,32 @@ def run_nnunet_training(
                 check=True,
                 env=environment,
             )
+
+
+def _validate_nnunet_training_duration(config: StudyConfig, trainer: str) -> None:
+    """Verify that the installed default trainer implements the locked epoch count."""
+
+    expected = int(config.section("segmentation")["epochs"])
+    if expected <= 0:
+        raise ValueError("The nnU-Net epoch count must be greater than zero.")
+    if trainer != "nnUNetTrainer":
+        return
+    try:
+        from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+    except ImportError as error:
+        raise RuntimeError(
+            "nnU-Net is unavailable. Install the segmentation optional dependency."
+        ) from error
+    source = inspect.getsource(nnUNetTrainer.__init__)
+    assignments = re.findall(r"self\.num_epochs\s*=\s*(\d+)", source)
+    if len(assignments) != 1:
+        raise RuntimeError("Unable to verify the default nnU-Net trainer epoch count.")
+    observed = int(assignments[0])
+    if observed != expected:
+        raise RuntimeError(
+            f"The installed nnU-Net trainer uses {observed} epochs; the locked study value is "
+            f"{expected}."
+        )
 
 
 def _validate_nnunet_plan(config: StudyConfig, preprocessed: str | Path) -> None:
@@ -199,6 +267,13 @@ def segmentation_metrics(
 
     reference = np.asarray(reference, dtype=bool)
     prediction = np.asarray(prediction, dtype=bool)
+    spacing = np.asarray(spacing_dhw, dtype=float)
+    if spacing.shape != (3,) or not np.isfinite(spacing).all() or np.any(spacing <= 0):
+        raise ValueError("Voxel spacing must contain three finite positive values.")
+    if not np.isfinite(surface_tolerance_mm) or surface_tolerance_mm <= 0:
+        raise ValueError("Surface tolerance must be finite and greater than zero.")
+    if reference.ndim != 3 or prediction.ndim != 3:
+        raise ValueError("Reference and prediction masks must be three-dimensional.")
     if reference.shape != prediction.shape:
         raise ValueError("Reference and prediction masks must have identical shapes.")
     if not reference.any():
@@ -208,7 +283,6 @@ def segmentation_metrics(
     prediction_count = prediction.sum(dtype=np.float64)
     dice = 2.0 * intersection / (reference_count + prediction_count)
     sensitivity = intersection / reference_count
-    spacing = np.asarray(spacing_dhw, dtype=float)
     voxel_volume_ml = float(np.prod(spacing) / 1000.0)
     reference_volume = reference_count * voxel_volume_ml
     prediction_volume = prediction_count * voxel_volume_ml
@@ -270,12 +344,18 @@ def evaluate_segmentation_manifest(
     missing = [column for column in required if column not in frame]
     if missing:
         raise ValueError(f"Segmentation manifest is missing columns: {', '.join(missing)}")
+    if frame.empty:
+        raise ValueError("Segmentation evaluation requires at least one patient.")
+    if frame[config.column("patient_id")].duplicated().any():
+        raise ValueError("Segmentation patient identifiers must be unique.")
+    if bootstrap_resamples <= 0:
+        raise ValueError("Bootstrap resamples must be greater than zero.")
     rows = []
     tolerance = float(config.section("segmentation")["surface_dice_tolerance_mm"])
     for record in frame.to_dict(orient="records"):
         reference_image = sitk.ReadImage(str(record[reference_column]), sitk.sitkUInt8)
         prediction_image = sitk.ReadImage(str(record[prediction_column]), sitk.sitkUInt8)
-        if reference_image.GetSize() != prediction_image.GetSize():
+        if not _same_image_geometry(reference_image, prediction_image):
             prediction_image = sitk.Resample(
                 prediction_image,
                 reference_image,
@@ -310,20 +390,29 @@ def evaluate_segmentation_manifest(
     ]
     rng = np.random.default_rng(seed)
     for cohort, group in patient_metrics.groupby(config.column("cohort"), sort=False):
-        values = group[metric_columns].to_numpy(float)
-        boot = np.empty((bootstrap_resamples, len(metric_columns)), dtype=float)
-        for index in range(bootstrap_resamples):
-            selected = rng.integers(0, len(group), size=len(group))
-            boot[index] = np.mean(values[selected], axis=0)
-        for metric_index, metric in enumerate(metric_columns):
+        for metric in metric_columns:
+            values = group[metric].to_numpy(float)
+            finite_values = values[np.isfinite(values)]
+            if finite_values.size == 0:
+                mean = ci_low = ci_high = float("nan")
+            else:
+                boot = np.empty(bootstrap_resamples, dtype=float)
+                for index in range(bootstrap_resamples):
+                    selected = rng.integers(0, finite_values.size, size=finite_values.size)
+                    boot[index] = np.mean(finite_values[selected])
+                mean = float(np.mean(finite_values))
+                ci_low = float(np.percentile(boot, 2.5))
+                ci_high = float(np.percentile(boot, 97.5))
             summary_rows.append(
                 {
                     "cohort": cohort,
                     "metric": metric,
                     "n": len(group),
-                    "mean": float(np.mean(values[:, metric_index])),
-                    "ci_low": float(np.percentile(boot[:, metric_index], 2.5)),
-                    "ci_high": float(np.percentile(boot[:, metric_index], 97.5)),
+                    "n_evaluable": int(finite_values.size),
+                    "nonfinite_n": int(len(values) - finite_values.size),
+                    "mean": mean,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
                 }
             )
     return patient_metrics, pd.DataFrame(summary_rows)

@@ -20,6 +20,42 @@ from .config import StudyConfig
 from .survival import structured_survival
 
 
+def _validate_prediction_table(
+    manifest: pd.DataFrame,
+    predictions: pd.DataFrame,
+    *,
+    patient_column: str,
+    horizons: np.ndarray,
+) -> None:
+    """Validate complete patient-model coverage and survival prediction invariants."""
+
+    if predictions.empty:
+        raise ValueError("Prediction table contains no rows.")
+    model_names = predictions["model"].astype("string")
+    if model_names.isna().any() or model_names.str.strip().eq("").any():
+        raise ValueError("Every prediction row must contain a nonempty model name.")
+    expected_patients = set(manifest[patient_column].astype(str))
+    for model_name, group in predictions.groupby("model", sort=False):
+        observed_patients = set(group[patient_column].astype(str))
+        missing = expected_patients.difference(observed_patients)
+        extra = observed_patients.difference(expected_patients)
+        if missing or extra:
+            raise ValueError(
+                f"Model '{model_name}' does not contain exactly one prediction for every patient."
+            )
+    probability_columns = [f"pfs_{int(horizon)}m" for horizon in horizons]
+    risk = pd.to_numeric(predictions["risk_score"], errors="coerce").to_numpy(float)
+    probability = predictions[probability_columns].apply(
+        pd.to_numeric, errors="coerce"
+    ).to_numpy(float)
+    if not np.isfinite(risk).all() or not np.isfinite(probability).all():
+        raise ValueError("Risk scores and survival probabilities must be finite.")
+    if np.any((probability < 0.0) | (probability > 1.0)):
+        raise ValueError("Survival probabilities must lie between zero and one.")
+    if np.any(np.diff(probability, axis=1) > 1e-8):
+        raise ValueError("Survival probabilities must not increase across prediction horizons.")
+
+
 def _metric_values(
     training_outcome: np.ndarray,
     test_outcome: np.ndarray,
@@ -102,7 +138,10 @@ def _bootstrap_metric_intervals(
     seed: int,
 ) -> dict[str, float]:
     rng = np.random.default_rng(seed)
-    values = {"c_index": [], "integrated_auc": [], "integrated_brier_score": []}
+    metric_names = ["c_index", "integrated_auc", "integrated_brier_score"]
+    metric_names.extend(f"auc_{int(horizon)}m" for horizon in horizons)
+    metric_names.extend(f"brier_{int(horizon)}m" for horizon in horizons)
+    values: dict[str, list[float]] = {metric: [] for metric in metric_names}
     for _ in range(resamples):
         selected = rng.integers(0, len(test_outcome), size=len(test_outcome))
         outcome = test_outcome[selected]
@@ -117,7 +156,8 @@ def _bootstrap_metric_intervals(
         except (ValueError, ZeroDivisionError):
             continue
         for metric in values:
-            values[metric].append(metrics[metric])
+            if np.isfinite(metrics[metric]):
+                values[metric].append(metrics[metric])
     result = {}
     for metric, estimates in values.items():
         array = np.asarray(estimates, dtype=float)
@@ -221,6 +261,7 @@ def _bootstrap_pairwise(
     rows = []
     for metric, values in differences.items():
         array = np.asarray(values, dtype=float)
+        array = array[np.isfinite(array)]
         if array.size < max(100, resamples // 2):
             raise RuntimeError("Too few valid paired bootstrap resamples were available.")
         probability = min(np.mean(array <= 0), np.mean(array >= 0))
@@ -253,6 +294,16 @@ def evaluate_models(
     time_col = config.column("pfs_time")
     event_col = config.column("pfs_event")
     horizons = np.asarray(config.section("icvs")["horizons_months"], dtype=float)
+    if (
+        horizons.ndim != 1
+        or horizons.size < 2
+        or not np.isfinite(horizons).all()
+        or np.any(horizons <= 0)
+        or np.any(np.diff(horizons) <= 0)
+    ):
+        raise ValueError(
+            "Evaluation horizons must contain at least two increasing positive values."
+        )
     required_prediction_columns = [
         patient_col,
         "model",
@@ -264,6 +315,12 @@ def evaluate_models(
         raise ValueError(f"Prediction table is missing columns: {', '.join(missing)}")
     if predictions.duplicated([patient_col, "model"]).any():
         raise ValueError("Prediction rows must be unique by patient and model.")
+    _validate_prediction_table(
+        manifest,
+        predictions,
+        patient_column=patient_col,
+        horizons=horizons,
+    )
     frame = predictions.merge(manifest, on=patient_col, how="left", validate="many_to_one")
     if frame[[cohort_col, time_col, event_col]].isna().any().any():
         raise ValueError("Predictions contain patients absent from the manifest.")
