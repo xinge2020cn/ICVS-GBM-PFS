@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter, KaplanMeierFitter
 from lifelines.statistics import logrank_test, proportional_hazard_test
+from scipy.integrate import trapezoid
 from sksurv.metrics import (
     brier_score,
     concordance_index_censored,
@@ -102,7 +103,7 @@ def _metric_values(
         if not np.isclose(brier_times[index], horizon):
             raise RuntimeError("Brier-score horizons changed unexpectedly.")
     result["integrated_brier_score"] = float(
-        np.trapezoid(brier_values, brier_times) / (brier_times[-1] - brier_times[0])
+        trapezoid(brier_values, brier_times) / (brier_times[-1] - brier_times[0])
     )
     return result
 

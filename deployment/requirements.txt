@@ -1,6 +1,6 @@
-numpy>=1.26.4,<3
+numpy>=1.26.4,<2
 joblib>=1.4,<2
-scikit-survival>=0.28,<0.29
+scikit-survival>=0.26,<0.27
 fastapi>=0.116,<1
 uvicorn[standard]>=0.35,<1
 pydantic>=2.11,<3
