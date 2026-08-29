@@ -20,6 +20,8 @@ from .icvs import fit_icvs_model
 from .preprocessing import preprocess_manifest
 from .radiomics import extract_radiomics_features, fit_radiomics_model
 from .segmentation import (
+    assemble_segmentation_manifests,
+    collect_nnunet_oof_predictions,
     evaluate_segmentation_manifest,
     prepare_nnunet_dataset,
     prepare_nnunet_inference,
@@ -109,6 +111,29 @@ def command_prepare_nnunet_inference(args: argparse.Namespace) -> None:
         input_dir=args.input_dir,
         prediction_dir=args.prediction_dir,
         output_manifest=args.output_manifest,
+    )
+
+
+def command_collect_nnunet_oof(args: argparse.Namespace) -> None:
+    frame, config = _load_manifest_and_config(args)
+    validate_manifest(frame, config, require_paths=PROCESSED_IMAGE_COLUMNS)
+    collect_nnunet_oof_predictions(
+        frame,
+        config,
+        nnunet_raw=args.nnunet_raw,
+        nnunet_results=args.nnunet_results,
+        output_manifest=args.output_manifest,
+        trainer=args.trainer,
+    )
+
+
+def command_assemble_segmentation(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    assemble_segmentation_manifests(
+        args.training_manifest,
+        args.validation_manifest,
+        config,
+        args.output_manifest,
     )
 
 
@@ -379,6 +404,22 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_inference.add_argument("--prediction-dir", required=True, type=Path)
     prepare_inference.add_argument("--output-manifest", required=True, type=Path)
     prepare_inference.set_defaults(function=command_prepare_nnunet_inference)
+
+    collect_oof = subparsers.add_parser("collect-nnunet-oof")
+    _common_parser(collect_oof)
+    collect_oof.add_argument("--manifest", required=True, type=Path)
+    collect_oof.add_argument("--nnunet-raw", required=True, type=Path)
+    collect_oof.add_argument("--nnunet-results", required=True, type=Path)
+    collect_oof.add_argument("--output-manifest", required=True, type=Path)
+    collect_oof.add_argument("--trainer", default="nnUNetTrainer")
+    collect_oof.set_defaults(function=command_collect_nnunet_oof)
+
+    assemble_segmentation = subparsers.add_parser("assemble-segmentation-manifest")
+    _common_parser(assemble_segmentation)
+    assemble_segmentation.add_argument("--training-manifest", required=True, type=Path)
+    assemble_segmentation.add_argument("--validation-manifest", required=True, type=Path)
+    assemble_segmentation.add_argument("--output-manifest", required=True, type=Path)
+    assemble_segmentation.set_defaults(function=command_assemble_segmentation)
 
     predict_nnunet = subparsers.add_parser("predict-nnunet")
     _common_parser(predict_nnunet)

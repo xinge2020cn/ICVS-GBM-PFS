@@ -42,13 +42,22 @@ Issues = "https://github.com/xinge2020cn/ICVS-GBM-PFS/issues"
 [project.optional-dependencies]
 radiomics = ["pyradiomics>=3.1,<4"]
 segmentation = ["nnunetv2>=2.4,<3"]
+deployment = [
+  "fastapi>=0.116,<1",
+  "pydantic>=2.11,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
 test = ["pytest>=8.3,<9", "ruff>=0.12,<1"]
 
 [project.scripts]
 icvs-gbm-pfs = "icvs_gbm_pfs.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["icvs_gbm_pfs*", "deployment*"]
+
+[tool.setuptools.package-data]
+deployment = ["Dockerfile", "README.md", "feature_schema.json", "requirements.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

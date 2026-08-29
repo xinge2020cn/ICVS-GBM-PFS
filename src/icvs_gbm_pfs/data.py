@@ -86,8 +86,12 @@ def validate_manifest(
     event_col = config.column("pfs_event")
     subset_col = config.column("biological_subset")
     age_col = config.column("age")
+    sex_col = config.column("sex")
+    location_col = config.column("tumor_location")
+    laterality_col = config.column("laterality")
     mgmt_col = config.column("mgmt")
     resection_col = config.column("extent_of_resection")
+    treatment_col = config.column("postoperative_treatment")
     required = [
         patient_col,
         cohort_col,
@@ -96,8 +100,12 @@ def validate_manifest(
         event_col,
         subset_col,
         age_col,
+        sex_col,
+        location_col,
+        laterality_col,
         mgmt_col,
         resection_col,
+        treatment_col,
     ]
     missing = [column for column in required if column not in frame]
     if missing:
@@ -177,6 +185,29 @@ def validate_manifest(
         values = pd.to_numeric(frame[column], errors="coerce")
         if values.isna().any() or not values.isin([0, 1]).all():
             raise ValueError(f"{label} values must use binary zero-one coding.")
+    categorical_fields = (
+        (sex_col, "Sex", {"Female", "Male"}),
+        (
+            location_col,
+            "Tumor location",
+            {"Frontal", "Temporal", "Parietal", "Occipital", "Deep-seated"},
+        ),
+        (laterality_col, "Laterality", {"Left", "Right", "Midline/bilateral"}),
+        (
+            treatment_col,
+            "Postoperative treatment",
+            {"Stupp regimen", "Radiotherapy only", "Temozolomide only", "Other/none"},
+        ),
+    )
+    for column, label, allowed in categorical_fields:
+        values = frame[column].astype("string")
+        if values.isna().any() or values.str.strip().eq("").any():
+            raise ValueError(f"{label} values must be complete.")
+        unknown_values = sorted(set(values.astype(str)).difference(allowed))
+        if unknown_values:
+            raise ValueError(
+                f"{label} contains unsupported values: {', '.join(unknown_values)}"
+            )
     if enforce_spatial_independence:
         training_centers = set(
             frame.loc[frame[cohort_col].eq(config.cohort("training")), center_col].astype(str)

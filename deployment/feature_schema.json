@@ -1,0 +1,44 @@
+{
+  "model_name": "Integrated Clinical-ViT Survival",
+  "input_fields": [
+    {
+      "name": "age_years",
+      "type": "number",
+      "minimum": 18,
+      "maximum": 100,
+      "required": true
+    },
+    {
+      "name": "mgmt_promoter_methylated",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "name": "extent_of_resection",
+      "type": "string",
+      "enum": ["gross_total", "non_gross_total"],
+      "required": true
+    },
+    {
+      "name": "vit_score_standardized",
+      "type": "number",
+      "required": true
+    }
+  ],
+  "internal_feature_order": [
+    "age_years",
+    "mgmt_methylated",
+    "non_gross_total_resection",
+    "vit_score_standardized"
+  ],
+  "output_fields": [
+    "risk_score",
+    "risk_group",
+    "pfs_probability_6m",
+    "pfs_probability_12m",
+    "pfs_probability_18m",
+    "pfs_probability_24m",
+    "pfs_probability_30m",
+    "pfs_probability_36m"
+  ]
+}

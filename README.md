@@ -1,6 +1,6 @@
 # ICVS-GBM-PFS: MRI phenotype modeling for progression-free survival in glioblastoma
 
-This repository contains the analysis code for patient-level MRI preprocessing, tumor-core segmentation, radiomics, three-dimensional deep survival modeling, integrated clinical-imaging survival modeling, locked-cohort evaluation, time-dependent model interpretation, and transcriptomic analysis.
+This repository contains the analysis code for patient-level MRI preprocessing, tumor-core segmentation, radiomics, three-dimensional deep survival modeling, integrated clinical-imaging survival modeling, locked-cohort evaluation, time-dependent model interpretation, transcriptomic analysis, and the research web interface.
 
 The implementation follows the accompanying study protocol:
 
@@ -16,9 +16,11 @@ The implementation follows the accompanying study protocol:
 
 This repository contains source code and fixed analysis parameters. It does not contain patient records, MRI volumes, masks, RNA-seq matrices, model checkpoints, or patient-level predictions.
 
+The complete methods-to-code map and availability boundary are documented in `METHODS_CROSSWALK.md`.
+
 ## Installation
 
-Python 3.11 is recommended.
+Python 3.11 is recommended for the maintained public package. Continuous integration tests Python 3.11 and 3.12. The study-reported software versions, including Python 3.10.13, are recorded separately in `environment/study-reported.yaml`; the maintained test environment is not presented as the environment that generated the reported results.
 
 ```bash
 python -m venv .venv
@@ -48,8 +50,12 @@ Required fields before MRI preprocessing:
 | `pfs_event` | `1` for progression or death, `0` for censoring |
 | `biological_subset` | `1` only for the nested training-cohort transcriptomic subset |
 | `age_years` | Age at the study-defined baseline |
+| `sex` | `Female` or `Male` |
+| `tumor_location` | `Frontal`, `Temporal`, `Parietal`, `Occipital`, or `Deep-seated` |
+| `laterality` | `Left`, `Right`, or `Midline/bilateral` |
 | `mgmt_methylated` | `1` for methylated, `0` for unmethylated |
 | `non_gross_total_resection` | `1` for non-gross-total resection, `0` for gross-total resection |
+| `postoperative_treatment` | `Stupp regimen`, `Radiotherapy only`, `Temozolomide only`, or `Other/none` |
 | `t1_path` | T1-weighted NIfTI volume |
 | `t2_path` | T2-weighted NIfTI volume |
 | `flair_path` | T2-FLAIR NIfTI volume |
@@ -108,6 +114,23 @@ icvs-gbm-pfs predict-nnunet \
   --nnunet-raw "$NNUNET_RAW" \
   --nnunet-preprocessed "$NNUNET_PREPROCESSED" \
   --nnunet-results "$NNUNET_RESULTS"
+```
+
+Training-cohort segmentation performance must use the prediction written for each patient by the fold in which that patient was held out. The following commands collect those out-of-fold predictions and join them to the locked temporal and spatial prediction mapping:
+
+```bash
+icvs-gbm-pfs collect-nnunet-oof \
+  --config configs/study.yaml \
+  --manifest "$ICVS_GBM_PFS_PROCESSED_MANIFEST" \
+  --nnunet-raw "$NNUNET_RAW" \
+  --nnunet-results "$NNUNET_RESULTS" \
+  --output-manifest "$ICVS_GBM_PFS_SEGMENTATION_TRAINING_MANIFEST"
+
+icvs-gbm-pfs assemble-segmentation-manifest \
+  --config configs/study.yaml \
+  --training-manifest "$ICVS_GBM_PFS_SEGMENTATION_TRAINING_MANIFEST" \
+  --validation-manifest "$ICVS_GBM_PFS_SEGMENTATION_MANIFEST" \
+  --output-manifest "$ICVS_GBM_PFS_SEGMENTATION_ALL_MANIFEST"
 ```
 
 Segmentation assessment operates on unedited automatic masks and reports Dice, surface Dice at 2 mm, sensitivity, HD95, relative volume error, and patient-level volume pairs for Bland-Altman analysis.
@@ -180,7 +203,7 @@ The augmentation path applies one spatial transform to all four MRI channels and
 
 ## Clinical and integrated models
 
-The clinical comparator uses the three retained predictors with a Breslow-tied Cox model. ICVS is fitted once using standardized out-of-fold ViT scores and training outcomes. Training performance and probabilities use out-of-bag trees; validation uses the locked full forest and the final-model ViT score transformation estimated in the training cohort.
+The clinical command first reproduces the seven-factor univariable screen and candidate multivariable model, writes the complete selection table, and verifies the three retained factors: age, extent of resection, and MGMT promoter methylation. It then fits the locked Breslow-tied Cox comparator. ICVS is fitted once using standardized out-of-fold ViT scores and training outcomes. Training performance and probabilities use out-of-bag trees; validation uses the locked full forest and the final-model ViT score transformation estimated in the training cohort.
 
 ```bash
 icvs-gbm-pfs fit-clinical \
@@ -257,10 +280,22 @@ Rscript R/biological_analysis.R \
   --output-dir "$ICVS_GBM_PFS_BIOLOGY_RESULTS"
 ```
 
+## Research web interface
+
+The interface accepts age, MGMT promoter methylation, extent of resection, and a precomputed standardized 3D-ViT score. It requires a governed `icvs_model.joblib` artifact and does not substitute a bundled model or generated output.
+
+```bash
+python -m pip install -e ".[deployment]"
+ICVS_MODEL_ARTIFACT=/absolute/path/icvs_model.joblib \
+  uvicorn deployment.app:app --host 0.0.0.0 --port 8000
+```
+
+The deployment contract and container instructions are in `deployment/README.md`.
+
 ## Quality controls
 
 ```bash
-ruff check src tests
+ruff check src tests deployment
 pytest
 ```
 

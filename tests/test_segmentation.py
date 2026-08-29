@@ -6,7 +6,12 @@ import pytest
 import SimpleITK as sitk
 
 from icvs_gbm_pfs.config import load_config
-from icvs_gbm_pfs.segmentation import prepare_nnunet_inference, segmentation_metrics
+from icvs_gbm_pfs.segmentation import (
+    assemble_segmentation_manifests,
+    collect_nnunet_oof_predictions,
+    prepare_nnunet_inference,
+    segmentation_metrics,
+)
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "study.yaml"
 
@@ -73,3 +78,86 @@ def test_prepare_nnunet_inference_writes_validation_mapping(tmp_path: Path) -> N
     assert set(mapping["case_id"]) == {"GBMIV_0001", "GBMIV_0002"}
     assert set(mapping["cohort"]) == {"temporal_validation", "spatial_validation"}
     assert manifest_path.is_file()
+
+
+def test_collects_one_out_of_fold_prediction_per_training_patient(tmp_path: Path) -> None:
+    config = load_config(CONFIG_PATH)
+    dataset_name = "Dataset501_GBMTumorCore"
+    raw_dataset = tmp_path / "raw" / dataset_name
+    raw_dataset.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "case_id": ["GBMTC_0001", "GBMTC_0002"],
+            "patient_id": ["P001", "P002"],
+        }
+    ).to_csv(raw_dataset / "case_mapping.csv", index=False)
+    model_dir = (
+        tmp_path
+        / "results"
+        / dataset_name
+        / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+    )
+    prediction_one = model_dir / "fold_0" / "validation" / "GBMTC_0001.nii.gz"
+    prediction_two = model_dir / "fold_1" / "validation" / "GBMTC_0002.nii.gz"
+    prediction_one.parent.mkdir(parents=True)
+    prediction_two.parent.mkdir(parents=True)
+    prediction_one.write_bytes(b"prediction-one")
+    prediction_two.write_bytes(b"prediction-two")
+    frame = pd.DataFrame(
+        {
+            "patient_id": ["P001", "P002"],
+            "cohort": ["training", "training"],
+            "preprocessed_tumor_mask_path": ["reference-one.nii.gz", "reference-two.nii.gz"],
+        }
+    )
+    output = tmp_path / "training_segmentation.csv"
+
+    result = collect_nnunet_oof_predictions(
+        frame,
+        config,
+        nnunet_raw=tmp_path / "raw",
+        nnunet_results=tmp_path / "results",
+        output_manifest=output,
+    )
+
+    assert set(result["patient_id"]) == {"P001", "P002"}
+    assert set(result["cohort"]) == {"training"}
+    assert result["prediction_mask_path"].str.contains("fold_").all()
+    assert output.is_file()
+
+
+def test_assembles_training_and_locked_validation_segmentation_manifests(
+    tmp_path: Path,
+) -> None:
+    training = tmp_path / "training.csv"
+    validation = tmp_path / "validation.csv"
+    columns = [
+        "case_id",
+        "patient_id",
+        "cohort",
+        "reference_mask_path",
+        "prediction_mask_path",
+    ]
+    pd.DataFrame(
+        [["T001", "P001", "training", "r1.nii.gz", "p1.nii.gz"]],
+        columns=columns,
+    ).to_csv(training, index=False)
+    pd.DataFrame(
+        [
+            ["V001", "P002", "temporal_validation", "r2.nii.gz", "p2.nii.gz"],
+            ["V002", "P003", "spatial_validation", "r3.nii.gz", "p3.nii.gz"],
+        ],
+        columns=columns,
+    ).to_csv(validation, index=False)
+    output = tmp_path / "assembled.csv"
+
+    result = assemble_segmentation_manifests(
+        training,
+        validation,
+        load_config(CONFIG_PATH),
+        output,
+    )
+
+    assert len(result) == 3
+    assert result["patient_id"].is_unique
+    assert output.is_file()

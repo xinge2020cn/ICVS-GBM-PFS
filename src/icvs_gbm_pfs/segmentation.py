@@ -198,6 +198,140 @@ def prepare_nnunet_inference(
     return result
 
 
+def collect_nnunet_oof_predictions(
+    frame: pd.DataFrame,
+    config: StudyConfig,
+    *,
+    nnunet_raw: str | Path,
+    nnunet_results: str | Path,
+    output_manifest: str | Path,
+    trainer: str = "nnUNetTrainer",
+) -> pd.DataFrame:
+    """Collect exactly one nnU-Net validation prediction per training patient."""
+
+    patient_col = config.column("patient_id")
+    cohort_col = config.column("cohort")
+    settings = config.section("segmentation")
+    dataset_id = int(settings["dataset_id"])
+    configuration = str(settings["configuration"])
+    dataset_name = f"Dataset{dataset_id:03d}_GBMTumorCore"
+    raw_dataset = Path(nnunet_raw).resolve() / dataset_name
+    mapping_path = raw_dataset / "case_mapping.csv"
+    if not mapping_path.is_file():
+        raise FileNotFoundError(f"nnU-Net case mapping not found: {mapping_path}")
+    mapping = pd.read_csv(mapping_path, dtype={patient_col: "string"})
+    required_mapping = {"case_id", patient_col}
+    missing_mapping = sorted(required_mapping.difference(mapping.columns))
+    if missing_mapping:
+        raise ValueError(
+            "nnU-Net case mapping is missing columns: " + ", ".join(missing_mapping)
+        )
+    if mapping["case_id"].duplicated().any() or mapping[patient_col].duplicated().any():
+        raise ValueError("nnU-Net case mapping must contain unique cases and patients.")
+    training = frame.loc[
+        frame[cohort_col].eq(config.cohort("training")),
+        [patient_col, cohort_col, "preprocessed_tumor_mask_path"],
+    ].copy()
+    if training.empty:
+        raise ValueError("The training cohort is empty.")
+    if training[patient_col].duplicated().any():
+        raise ValueError("Training patient identifiers must be unique.")
+    if set(mapping[patient_col].astype(str)) != set(training[patient_col].astype(str)):
+        raise ValueError("nnU-Net case mapping does not match the complete training cohort.")
+    results_dataset = Path(nnunet_results).resolve() / dataset_name
+    model_directories = sorted(
+        path
+        for path in results_dataset.glob(f"{trainer}__*__{configuration}")
+        if path.is_dir()
+    )
+    if len(model_directories) != 1:
+        raise FileNotFoundError(
+            f"Expected one nnU-Net model directory in {results_dataset}, "
+            f"found {len(model_directories)}."
+        )
+    model_directory = model_directories[0]
+    rows: list[dict[str, object]] = []
+    for record in mapping.to_dict(orient="records"):
+        case_id = str(record["case_id"])
+        predictions = [
+            model_directory / f"fold_{int(fold)}" / "validation" / f"{case_id}.nii.gz"
+            for fold in settings["folds"]
+        ]
+        available = [path for path in predictions if path.is_file()]
+        if len(available) != 1:
+            raise FileNotFoundError(
+                f"Expected one out-of-fold prediction for {case_id}, found {len(available)}."
+            )
+        rows.append(
+            {
+                "case_id": case_id,
+                patient_col: str(record[patient_col]),
+                "prediction_mask_path": str(available[0].resolve()),
+            }
+        )
+    result = pd.DataFrame(rows).merge(
+        training,
+        on=patient_col,
+        how="left",
+        validate="one_to_one",
+    )
+    result = result.rename(
+        columns={"preprocessed_tumor_mask_path": "reference_mask_path"}
+    )[["case_id", patient_col, cohort_col, "reference_mask_path", "prediction_mask_path"]]
+    manifest_path = Path(output_manifest).resolve()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(manifest_path, index=False)
+    return result
+
+
+def assemble_segmentation_manifests(
+    training_manifest: str | Path,
+    validation_manifest: str | Path,
+    config: StudyConfig,
+    output_manifest: str | Path,
+) -> pd.DataFrame:
+    """Assemble training out-of-fold and locked validation segmentation mappings."""
+
+    patient_col = config.column("patient_id")
+    cohort_col = config.column("cohort")
+    required = [
+        "case_id",
+        patient_col,
+        cohort_col,
+        "reference_mask_path",
+        "prediction_mask_path",
+    ]
+    tables = []
+    for path in (training_manifest, validation_manifest):
+        source = Path(path).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Segmentation manifest not found: {source}")
+        table = pd.read_csv(source, dtype={patient_col: "string"})
+        missing = [column for column in required if column not in table]
+        if missing:
+            raise ValueError(
+                f"Segmentation manifest {source} is missing columns: {', '.join(missing)}"
+            )
+        tables.append(table[required])
+    result = pd.concat(tables, ignore_index=True)
+    if result[patient_col].duplicated().any() or result["case_id"].duplicated().any():
+        raise ValueError("Assembled segmentation cases and patient identifiers must be unique.")
+    observed = set(result[cohort_col].astype(str))
+    expected = {
+        config.cohort("training"),
+        config.cohort("temporal_validation"),
+        config.cohort("spatial_validation"),
+    }
+    if observed != expected:
+        raise ValueError(
+            "Assembled segmentation manifest must contain training, temporal, and spatial cohorts."
+        )
+    destination = Path(output_manifest).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(destination, index=False)
+    return result
+
+
 @contextmanager
 def nnunet_environment(
     raw: str | Path,

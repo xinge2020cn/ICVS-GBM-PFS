@@ -100,6 +100,7 @@ def load_config(path: str | Path) -> StudyConfig:
         "segmentation",
         "deep_survival",
         "radiomics",
+        "clinical",
         "icvs",
         "evaluation",
     }
@@ -123,8 +124,12 @@ def load_config(path: str | Path) -> StudyConfig:
         "pfs_event",
         "biological_subset",
         "age",
+        "sex",
+        "tumor_location",
+        "laterality",
         "mgmt",
         "extent_of_resection",
+        "postoperative_treatment",
     }
     columns = values["columns"]
     if not isinstance(columns, dict):
@@ -288,6 +293,34 @@ def load_config(path: str | Path) -> StudyConfig:
     )
     if not isinstance(radiomics.get("use_one_standard_error_rule"), bool):
         raise ValueError("The radiomics one-standard-error setting must be Boolean.")
+    clinical = values["clinical"]
+    _finite_number(
+        clinical.get("univariable_p_threshold"),
+        "The clinical univariable P-value threshold",
+        minimum=0.0,
+        maximum=1.0,
+        maximum_inclusive=True,
+    )
+    _finite_number(
+        clinical.get("multivariable_p_threshold"),
+        "The clinical multivariable P-value threshold",
+        minimum=0.0,
+        maximum=1.0,
+        maximum_inclusive=True,
+    )
+    _finite_number(
+        clinical.get("selection_penalizer"),
+        "The clinical selection penalizer",
+        minimum=0.0,
+        minimum_inclusive=True,
+    )
+    expected_clinical = clinical.get("expected_retained_predictors")
+    if expected_clinical != ["age", "extent_of_resection", "mgmt"]:
+        raise ValueError(
+            "The locked clinical model must retain age, extent_of_resection, and mgmt."
+        )
+    if not isinstance(clinical.get("enforce_expected_retained_predictors"), bool):
+        raise ValueError("The clinical retained-predictor enforcement setting must be Boolean.")
     horizons = values["icvs"].get("horizons_months")
     if (
         not isinstance(horizons, list)

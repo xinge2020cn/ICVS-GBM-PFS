@@ -19,8 +19,16 @@ def valid_manifest() -> pd.DataFrame:
             "pfs_event": [1, 0, 1],
             "biological_subset": [1, 0, 0],
             "age_years": [54.0, 61.0, 48.0],
+            "sex": ["Female", "Male", "Female"],
+            "tumor_location": ["Frontal", "Temporal", "Parietal"],
+            "laterality": ["Left", "Right", "Left"],
             "mgmt_methylated": [1, 0, 1],
             "non_gross_total_resection": [0, 1, 0],
+            "postoperative_treatment": [
+                "Stupp regimen",
+                "Radiotherapy only",
+                "Stupp regimen",
+            ],
         }
     )
 
@@ -87,6 +95,13 @@ def test_manifest_rejects_invalid_clinical_coding() -> None:
     frame["mgmt_methylated"] = frame["mgmt_methylated"].astype(float)
     frame.loc[0, "mgmt_methylated"] = 0.5
     with pytest.raises(ValueError, match="MGMT"):
+        validate_manifest(frame, load_config(CONFIG_PATH))
+
+
+def test_manifest_rejects_unknown_clinical_category() -> None:
+    frame = valid_manifest()
+    frame.loc[0, "tumor_location"] = "Unknown"
+    with pytest.raises(ValueError, match="Tumor location"):
         validate_manifest(frame, load_config(CONFIG_PATH))
 
 

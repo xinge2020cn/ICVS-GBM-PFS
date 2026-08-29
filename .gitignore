@@ -15,6 +15,11 @@
 !/R/**
 !/tests/
 !/tests/**
+!/deployment/
+!/deployment/**
+!/environment/
+!/environment/**
+!/METHODS_CROSSWALK.md
 
 **/*.csv
 **/*.tsv

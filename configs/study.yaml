@@ -8,8 +8,12 @@ columns:
   pfs_event: pfs_event
   biological_subset: biological_subset
   age: age_years
+  sex: sex
+  tumor_location: tumor_location
+  laterality: laterality
   mgmt: mgmt_methylated
   extent_of_resection: non_gross_total_resection
+  postoperative_treatment: postoperative_treatment
 
 cohorts:
   training: training
@@ -75,6 +79,16 @@ radiomics:
   univariable_p_threshold: 0.05
   cross_validation_folds: 10
   use_one_standard_error_rule: true
+
+clinical:
+  univariable_p_threshold: 0.20
+  multivariable_p_threshold: 0.05
+  selection_penalizer: 0.001
+  expected_retained_predictors:
+    - age
+    - extent_of_resection
+    - mgmt
+  enforce_expected_retained_predictors: true
 
 icvs:
   horizons_months: [6, 12, 18, 24, 30, 36]

@@ -10,8 +10,12 @@
     "pfs_event",
     "biological_subset",
     "age_years",
+    "sex",
+    "tumor_location",
+    "laterality",
     "mgmt_methylated",
     "non_gross_total_resection",
+    "postoperative_treatment",
     "t1_path",
     "t2_path",
     "flair_path",
@@ -47,11 +51,28 @@
       "type": "number",
       "minimum": 18
     },
+    "sex": {
+      "enum": ["Female", "Male"]
+    },
+    "tumor_location": {
+      "enum": ["Frontal", "Temporal", "Parietal", "Occipital", "Deep-seated"]
+    },
+    "laterality": {
+      "enum": ["Left", "Right", "Midline/bilateral"]
+    },
     "mgmt_methylated": {
       "enum": [0, 1]
     },
     "non_gross_total_resection": {
       "enum": [0, 1]
+    },
+    "postoperative_treatment": {
+      "enum": [
+        "Stupp regimen",
+        "Radiotherapy only",
+        "Temozolomide only",
+        "Other/none"
+      ]
     },
     "t1_path": {
       "type": "string",
